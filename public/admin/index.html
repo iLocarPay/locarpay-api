@@ -3623,11 +3623,6 @@
         if (hasDoc) return `<button type="button" class="tn2-mi" onclick="regenContract('${c.id}',this);_tnClose(this)">${_rv}Reenviar contrato</button>`;
         return `<button type="button" class="tn2-mi" onclick="generateContractForTenant('${c.id}',this);_tnClose(this)">${_sv}Gerar contrato</button>`;
       })();
-      const _oCob = (() => {
-        const c = contracts.find(x => x.tenantId === t.id && x.active);
-        if (!c) return '';
-        return `<button type="button" class="tn2-mi" onclick="gerarCobrancaManual('${c.id}','${c.ownerId||currentOwnerId||''}','${(t.name||'').replace(/'/g,"\\'")}');_tnClose(this)"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>Gerar cobrança</button>`;
-      })();
       const _oAvulsa = `<button type="button" class="tn2-mi" onclick="openAvulsa('${t.id}','${(t.name||'').replace(/'/g,"\\'")}','${(t.email||'').replace(/'/g,"\\'")}');_tnClose(this)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>Cobrança avulsa</button>`;
       const _oHist   = `<button type="button" class="tn2-mi" onclick="openHistory('${t.id}');_tnClose(this)"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.1"/></svg>Histórico</button>`;
       const _oCredit = (() => {
@@ -3637,7 +3632,7 @@
         return `<button type="button" class="tn2-mi" onclick="openCreditAnalysis('${t.id}');_tnClose(this)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>${esc(lbl)}</button>`;
       })();
       const _oDel = `<button type="button" class="tn2-mi danger" onclick="deleteTenant('${t.id}','${(t.name||'').replace(/'/g,'')}');_tnClose(this)"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>Excluir</button>`;
-      const _menuInner = `${_oContract}${_oCob}${_oAvulsa}${_oHist}${_oCredit}<div class="tn2-sep"></div>${_oDel}`;
+      const _menuInner = `${_oContract}${_oAvulsa}${_oHist}${_oCredit}<div class="tn2-sep"></div>${_oDel}`;
       const _moreBtnHtml = (lbl) => `<button type="button" class="tn2-more" aria-label="${lbl}" aria-haspopup="menu" aria-expanded="false" onclick="_tnMore(this,event)"><svg width="16" height="4" viewBox="0 0 16 4" aria-hidden="true" fill="currentColor"><circle cx="2" cy="2" r="1.5"/><circle cx="8" cy="2" r="1.5"/><circle cx="14" cy="2" r="1.5"/></svg></button>`;
       const _editBtnHtml = `<button type="button" class="tn2-btn" onclick="openEditTenant('${t.id}')"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>Editar</button>`;
       const _docsBtnHtml = `<button type="button" class="tn2-docs${docsCount>0?' tn2-docs-has':''}" onclick="openDocsModal_${t.id}()" aria-label="Documentos de ${esc(t.name)}"><svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>${docsCount}/5</button>`;
