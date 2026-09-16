@@ -4293,30 +4293,6 @@
     finally { btn.disabled = false; btn.textContent = 'Exportar CSV'; }
   }
 
-  window.gerarCobrancaManual = async function gerarCobrancaManual(contractId, ownerId, tenantName) {
-    const now = new Date();
-    const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const monthStr = window.prompt(`Mês para gerar cobrança de ${tenantName}\n(formato AAAA-MM, ex: 2026-09)\nDeixe vazio para mês atual:`, defaultMonth);
-    if (monthStr === null) return; // cancelado
-    try {
-      const token = await auth.currentUser.getIdToken();
-      const body = { step: 'generate-charge-manual', contractId, ownerId };
-      if (monthStr.trim()) body.monthStr = monthStr.trim();
-      const r = await fetch('/api/ilocarpay-card', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-        body: JSON.stringify(body)
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || 'Erro desconhecido');
-      if (d.created > 0) {
-        showToast(`Cobrança gerada! PIX sendo criado em segundo plano.`, 'success');
-      } else {
-        showToast(d.reason || 'Cobrança já existe para este mês.', 'info');
-      }
-    } catch (e) { showToast('Erro: ' + e.message, 'error'); }
-  };
-
   async function generateCharges() {
     const btn = $('btn-generate-charges');
     btn.disabled = true;
