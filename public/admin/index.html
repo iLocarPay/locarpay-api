@@ -813,6 +813,7 @@
   };
 
   function renderOverdue() {
+    const fmt = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
     const tbody = $('overdue-tbody');
     const total = overdueCharges.reduce((s, c) => s + (c.totalAmount || c.baseRent || 0), 0);
     $('overdue-count').textContent = `${overdueCharges.length} cobrança${overdueCharges.length !== 1 ? 's' : ''} vencida${overdueCharges.length !== 1 ? 's' : ''}`;
@@ -844,7 +845,7 @@
         <td class="actions">
           <button class="btn-sm" style="color:#81c784;border-color:#2a4a2a" onclick="markChargePaid('${c.id}')">✓ Pago</button>
           <button class="btn-sm" onclick="sendOverduePush('${c.tenantId}')">Push</button>
-          <button class="btn-sm" style="color:#ef9a9a;border-color:#4a1a1a" onclick="estornarCobranca('${c.id}','${esc(tenant.name)}')">↩ Estornar</button>
+          <button class="btn-sm" style="color:#ef9a9a;border-color:#4a1a1a" onclick="estornarCobranca('${c.id}',${esc(JSON.stringify(String(tenant.name ?? '')))})">↩ Estornar</button>
         </td>
       </tr>`;
     }).join('');
