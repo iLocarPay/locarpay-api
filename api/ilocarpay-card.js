@@ -672,16 +672,62 @@ async function handleDeleteSaved(db, body) {
   return { ok: true };
 }
 
+// ── REFUND AUTHORIZATION ──────────────────────────────────────────────────────
+// Estorno só para o dono real da cobrança (owners/{charge.ownerId}.email == e-mail
+// do token, mesma regra do isOwnerOf nas Firestore Rules) ou master. ownerId, role
+// e demais campos do body são ignorados. Fail-closed: roda antes de qualquer
+// chamada Asaas ou escrita no Firestore.
+const REFUND_MASTER_EMAILS = ['denisfelicio20@gmail.com', 'contatotransgu@gmail.com'];
+
+async function authorizeChargeRefund(db, req) {
+  const header  = req.headers?.authorization || '';
+  const idToken = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  if (!idToken) throw Object.assign(new Error('Nao autorizado'), { status: 401 });
+
+  let decoded;
+  try {
+    decoded = await getAuth().verifyIdToken(idToken, true);
+  } catch (e) {
+    const inactive = e?.code === 'auth/user-disabled' || e?.code === 'auth/user-not-found';
+    throw Object.assign(new Error(inactive ? 'Acesso negado' : 'Nao autorizado'), { status: inactive ? 403 : 401 });
+  }
+
+  const chargeId = typeof req.body?.chargeId === 'string' ? req.body.chargeId.trim() : '';
+  if (!chargeId || chargeId.includes('/')) throw Object.assign(new Error('chargeId obrigatório'), { status: 400 });
+
+  const denied = () => Object.assign(new Error('Acesso negado'), { status: 403 });
+
+  // Cobrança inexistente e cobrança sem dono comprovável respondem igual (403)
+  const chargeSnap = await db.collection('charges').doc(chargeId).get();
+  const ownerId = chargeSnap.exists ? chargeSnap.data().ownerId : '';
+  if (typeof ownerId !== 'string' || !ownerId) throw denied();
+
+  const ownerSnap = await db.collection('owners').doc(ownerId).get();
+  if (!ownerSnap.exists) throw denied();
+
+  const email = typeof decoded.email === 'string' ? decoded.email.toLowerCase() : '';
+  if (!email) throw denied();
+  if (REFUND_MASTER_EMAILS.includes(email)) return { chargeId, ownerId };
+
+  const owner = ownerSnap.data() || {};
+  const ownerEmail = typeof owner.email === 'string' ? owner.email.toLowerCase() : '';
+  if (!ownerEmail || ownerEmail !== email || owner.status === 'suspended') throw denied();
+
+  return { chargeId, ownerId };
+}
+
 // ── REFUND ────────────────────────────────────────────────────────────────────
 async function handleRefund(db, body) {
-  const { chargeId } = body;
+  const { chargeId, authorizedOwnerId } = body;
   if (!chargeId) throw Object.assign(new Error('chargeId obrigatório'), { status: 400 });
 
   const chargeSnap = await db.collection('charges').doc(chargeId).get();
   if (!chargeSnap.exists) throw Object.assign(new Error('Cobrança não encontrada'), { status: 404 });
 
   const charge = chargeSnap.data();
-  const ownerId = charge.ownerId || await getDefaultOwnerId(db);
+  // Revalida o dono persistido imediatamente antes da Asaas (sem fallback para owner padrão)
+  const ownerId = charge.ownerId;
+  if (!ownerId || ownerId !== authorizedOwnerId) throw Object.assign(new Error('Acesso negado'), { status: 403 });
   const apiKey = await getAsaasKey(db, ownerId);
   if (!apiKey) throw Object.assign(new Error('Chave Asaas não configurada'), { status: 500 });
 
@@ -2785,7 +2831,7 @@ export default async function handler(req, res) {
 
     // Steps que exigem Firebase ID Token de owner autenticado
     const OWNER_AUTH_STEPS = new Set([
-      'refund', 'adjust-rent', 'close-contract', 'generate-charges',
+      'adjust-rent', 'close-contract', 'generate-charges',
       'mark-overdue', 'update-charge-value', 'send-push', 'notify-upcoming',
       'send-receipt', 'annual-receipt', 'notify-expiry', 'revoke-tenant',
       'sync-status', 'sync-customers', 'migrate-tenant-uid', 'monthly-report',
@@ -2805,7 +2851,10 @@ export default async function handler(req, res) {
     if (step === 'init')           return res.status(200).json(await handleInit(db, req.body, null));
     if (step === 'verify-amount')  return res.status(200).json(await handleVerifyAmount(db, req.body, req));
     if (step === 'confirm')        return res.status(200).json(await handleConfirm(db, req.body));
-    if (step === 'refund')         return res.status(200).json(await handleRefund(db, req.body));
+    if (step === 'refund') {
+      const refundAuth = await authorizeChargeRefund(db, req);
+      return res.status(200).json(await handleRefund(db, { chargeId: refundAuth.chargeId, authorizedOwnerId: refundAuth.ownerId }));
+    }
     if (step === 'preview')        return res.status(200).json(await handlePreview(db, req.body));
     if (step === 'list-saved')     return res.status(200).json(await handleListSaved(db, req.body));
     if (step === 'delete-saved')   return res.status(200).json(await handleDeleteSaved(db, req.body));
