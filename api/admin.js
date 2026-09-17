@@ -180,9 +180,11 @@ async function deleteTenant(db, tenantId) {
 }
 
 async function setupAsaas(db, ownerId) {
+  // SEC-FIN-01B: o owner endpoint agora exige master; encaminha o segredo interno.
+  // (Este proxy só é alcançado após verifyAdmin ter autenticado o master.)
   const r = await fetch('https://ilocarpay.com.br/api/ilocarpay-owner', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-admin-token': process.env.ADMIN_SECRET || '' },
     body: JSON.stringify({ step: 'setup-asaas', ownerId })
   });
   const d = await r.json();

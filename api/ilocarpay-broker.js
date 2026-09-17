@@ -16,6 +16,7 @@ import { getMessaging }                  from 'firebase-admin/messaging';
 import { getStorage }                    from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
 import { PDFDocument as PdfLib, rgb, StandardFonts } from 'pdf-lib';
+import { requireOwnerBearer, requireMasterBearer } from '../lib/authz.js';
 
 function initFirebase() {
   if (getApps().length) return;
@@ -1860,6 +1861,26 @@ async function handleCronRetryAssinafy(db) {
       } catch (_) {
         return res.status(401).json({ error: 'Token inválido' });
       }
+    }
+
+    // SEC-FIN-01B: autorização server-side dos steps administrativos — ANTES de qualquer side effect.
+    // Ownership resolvido no banco; nenhum campo do corpo concede privilégio.
+    if (step === 'register-broker') {
+      await requireOwnerBearer(db, req, req.body?.ownerId);
+    } else if (step === 'update-broker' || step === 'delete-broker') {
+      const bId = req.body?.brokerId;
+      if (!bId) throw Object.assign(new Error('brokerId obrigatório'), { status: 400 });
+      const bSnap = await db.collection('brokers').doc(bId).get();
+      if (!bSnap.exists) throw Object.assign(new Error('Corretor não encontrado'), { status: 404 });
+      await requireOwnerBearer(db, req, bSnap.data().ownerId);
+    } else if (step === 'approve-lead') {
+      const lId = req.body?.leadId;
+      if (!lId) throw Object.assign(new Error('leadId obrigatório'), { status: 400 });
+      const lSnap = await db.collection('leads').doc(lId).get();
+      if (!lSnap.exists) throw Object.assign(new Error('Lead não encontrado'), { status: 404 });
+      await requireOwnerBearer(db, req, lSnap.data().ownerId);
+    } else if (step === 'save-assinafy-key') {
+      await requireMasterBearer(req);
     }
 
     let result;

@@ -425,7 +425,7 @@
     try {
       const r = await fetch('/api/ilocarpay-owner', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': getToken() },
         body: JSON.stringify(payload)
       });
       const d = await r.json();
@@ -468,7 +468,7 @@
     try {
       const r = await fetch('/api/ilocarpay-owner', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': getToken() },
         body: JSON.stringify({ step: 'setup-asaas', ownerId: id })
       });
       const d = await r.json();

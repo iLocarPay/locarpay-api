@@ -205,6 +205,12 @@ export default async function handler(req, res) {
     const db  = getFirestore();
     const { step, callerEmail } = req.body || {};
 
+    // SEC-FIN-01B: módulo sem uso legítimo confirmado e sem autorização segura → fail-closed
+    // (zero consulta externa, zero escrita). Reversível: remover este bloco para reativar.
+    if (step === 'check-serasa' || step === 'check-boavista' || step === 'save-credentials') {
+      throw Object.assign(new Error('Módulo de análise de crédito temporariamente indisponível.'), { status: 503 });
+    }
+
     let result;
     if      (step === 'check-serasa')      result = await handleCheck(db, req.body, 'serasa');
     else if (step === 'check-boavista')    result = await handleCheck(db, req.body, 'boavista');

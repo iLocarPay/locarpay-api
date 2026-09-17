@@ -10,6 +10,7 @@ import { getAuth }                        from 'firebase-admin/auth';
 import { getMessaging }                   from 'firebase-admin/messaging';
 import { getStorage }                     from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
+import { requireSuperAdmin }              from '../lib/authz.js';
 
 // URL base do Asaas — configure ASAAS_API_URL para apontar ao sandbox em dev/homologação.
 // Em produção, se a variável não estiver definida, usa o endpoint de produção (compatibilidade).
@@ -116,7 +117,7 @@ async function handleRegister(db, body) {
     name, email, phone, cpfCnpj, cnpj, companyType,
     address, addressNumber, province, postalCode,
     birthDate,
-    plan = 'trial', firebaseUid
+    plan = 'trial'
   } = body;
   if (!name || !email) throw Object.assign(new Error('name e email sao obrigatorios'), { status: 400 });
 
@@ -129,9 +130,9 @@ async function handleRegister(db, body) {
   const trialEndsAt = Timestamp.fromMillis(Date.now() + 30 * 24 * 60 * 60 * 1000);
   const planConfig = PLANS[plan] || PLANS.trial;
 
-  const docRef = firebaseUid
-    ? db.collection('owners').doc(firebaseUid)
-    : db.collection('owners').doc();
+  // SEC-FIN-01B: ownerId sempre gerado server-side. O firebaseUid do cliente é
+  // ignorado para impedir sobrescrita de owner existente (takeover).
+  const docRef = db.collection('owners').doc();
 
   // Cria documento basico primeiro
   const ownerData = {
@@ -314,7 +315,11 @@ async function migrateCollection(db, collectionName, ownerId) {
 
 async function handleMigrate(db, body) {
   const { secret, ownerId } = body;
-  if (secret !== process.env.MIGRATE_SECRET) throw Object.assign(new Error('nao autorizado'), { status: 403 });
+  // SEC-FIN-01B: fail-closed — sem MIGRATE_SECRET configurado, recusa antes de qualquer side effect.
+  const migrateSecret = process.env.MIGRATE_SECRET;
+  if (!migrateSecret || typeof secret !== 'string' || secret !== migrateSecret) {
+    throw Object.assign(new Error('nao autorizado'), { status: 403 });
+  }
   if (!ownerId) throw Object.assign(new Error('ownerId obrigatorio'), { status: 400 });
 
   const ownerSnap = await db.collection('owners').doc(ownerId).get();
@@ -1024,6 +1029,8 @@ export default async function handler(req, res) {
     }
 
     if (step === 'register')       return res.status(201).json(await handleRegister(db, body));
+    // SEC-FIN-01B: update e setup-asaas exigem master (x-admin-token ou Firebase master) — autoriza ANTES de qualquer side effect.
+    if (step === 'update' || step === 'setup-asaas') await requireSuperAdmin(req);
     if (step === 'update')         return res.status(200).json(await handleUpdate(db, body));
     if (step === 'setup-asaas')    return res.status(200).json(await handleSetupAsaas(db, body));
     if (step === 'migrate')        return res.status(200).json(await handleMigrate(db, body));

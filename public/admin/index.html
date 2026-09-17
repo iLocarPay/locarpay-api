@@ -1326,10 +1326,11 @@
     const st = $('assinafy-key-status');
     st.textContent = 'Salvando...'; st.style.color = '#888';
     try {
+      const _akTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ step: 'save-assinafy-key', apiKey: key, callerEmail: auth.currentUser?.email })
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _akTkn },
+        body: JSON.stringify({ step: 'save-assinafy-key', apiKey: key })
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -1903,8 +1904,9 @@
     const mode = document.querySelector('input[name="approve-mode"]:checked')?.value || 'assinafy';
     btn.disabled = true; btn.textContent = 'Aprovando...';
     try {
+      const _alTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _alTkn },
         body: JSON.stringify({
           step: 'approve-lead',
           leadId: approvingLeadId,
@@ -2108,8 +2110,9 @@
     const btn = $('broker-save-btn');
     btn.disabled = true; btn.textContent = 'Cadastrando...';
     try {
+      const _bkTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _bkTkn },
         body: JSON.stringify({ step: 'register-broker', ownerId: currentOwnerId, name, email, phone })
       });
       const data = await res.json();
@@ -2238,8 +2241,9 @@
     const btn = $('edit-broker-save-btn');
     btn.disabled = true; btn.textContent = 'Salvando...';
     try {
+      const _bkTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _bkTkn },
         body: JSON.stringify({ step: 'update-broker', brokerId, name, phone, active, creci, commissionPct })
       });
       const data = await res.json();
@@ -2472,8 +2476,9 @@
   window.deleteBroker = async (brokerId, name) => {
     if (!confirm(`Excluir o corretor "${name}"?\n\nEsta ação não pode ser desfeita.`)) return;
     try {
+      const _bkTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _bkTkn },
         body: JSON.stringify({ step: 'delete-broker', brokerId })
       });
       const data = await res.json();
