@@ -8,6 +8,7 @@ import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getAuth }                        from 'firebase-admin/auth';
 import { getMessaging }                  from 'firebase-admin/messaging';
 import { getAsaasKey, getDefaultOwnerId, checkOwnerPlanActive, resolveChargeOwnerKey } from '../lib/owner.js';
+import { requireTenant, chargeOwnedByTenant } from '../lib/authz.js';
 import nodemailer                         from 'nodemailer';
 
 const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/v3').replace(/\/$/, '');
@@ -2811,6 +2812,35 @@ export default async function handler(req, res) {
     const db = getFirestore();
 
     const { step, ownerId: bodyOwnerId } = req.body || {};
+
+    // SEC-FIN-02B2: pagamentos do inquilino exigem Firebase ID token; identidade e ownership
+    // resolvidos no servidor ANTES de qualquer lookup/efeito financeiro. tenantId/email/uid do
+    // corpo não concedem acesso. (create-extra-pix é fluxo do owner/admin — mantido no B1.)
+    const TENANT_PAY_STEPS = new Set(['init', 'verify-amount', 'confirm', 'list-saved', 'delete-saved', 'preview']);
+    if (TENANT_PAY_STEPS.has(step)) {
+      const auth = await requireTenant(db, req);           // 401 s/token/inválido/revogado; 403 suspenso
+      req.body = req.body || {};
+      // Identidade autoritativa: o tenant é o uid do token.
+      if (step === 'init' || step === 'list-saved' || step === 'delete-saved') req.body.tenantId = auth.uid;
+      // Ownership das cobranças alvo.
+      if (step === 'init' || step === 'preview') {
+        const ids = (Array.isArray(req.body.chargeIds) && req.body.chargeIds.length ? req.body.chargeIds : [req.body.chargeId]).filter(Boolean);
+        if (!ids.length) throw Object.assign(new Error('chargeId obrigatório'), { status: 400 });
+        const snaps = await Promise.all(ids.map(id => db.collection('charges').doc(id).get()));
+        for (const s of snaps) {
+          if (!s.exists) throw Object.assign(new Error('Cobrança não encontrada'), { status: 404 });
+          if (!chargeOwnedByTenant(s.data(), auth)) throw Object.assign(new Error('Acesso negado'), { status: 403 });
+        }
+      }
+      // Ownership da verificação (verify-amount/confirm): pertence ao tenant autenticado.
+      if (step === 'verify-amount' || step === 'confirm') {
+        const vId = req.body.verificationId;
+        if (!vId) throw Object.assign(new Error('verificationId obrigatório'), { status: 400 });
+        const vSnap = await db.collection('cardVerifications').doc(vId).get();
+        if (!vSnap.exists) throw Object.assign(new Error('Verificação não encontrada'), { status: 404 });
+        if ((vSnap.data().tenantId || '') !== auth.uid) throw Object.assign(new Error('Acesso negado'), { status: 403 });
+      }
+    }
 
     // Verifica plano ativo nos steps que geram cobranças
     if (step === 'init' || step === 'confirm' || step === 'preview') {

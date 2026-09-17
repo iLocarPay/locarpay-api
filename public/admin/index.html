@@ -3424,10 +3424,11 @@
               } else {
                 // 2. Regenera QR imediatamente — listener em tempo real do app recebe na hora
                 showToast(`Atualizando QR Code de ${allDocs.length} cobrança(s)...`, 'info');
+                const _pixTkn = await auth.currentUser.getIdToken();
                 const regenPromises = allDocs.map(ch =>
                   fetch('/api/ilocarpay-pix', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _pixTkn },
                     body: JSON.stringify({ tenantId: editingTenantId, chargeId: ch.id })
                   }).then(r => r.json()).catch(e => ({ error: e.message }))
                 );

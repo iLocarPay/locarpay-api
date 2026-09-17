@@ -5,6 +5,7 @@
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore }                  from 'firebase-admin/firestore';
 import { getAsaasKey, getDefaultOwnerId, checkOwnerPlanActive, resolveChargeOwnerKey } from '../lib/owner.js';
+import { verifyBearer, assertActiveUser, authorizeChargeAccess } from '../lib/authz.js';
 
 function initFirebase() {
   if (getApps().length) return;
@@ -69,15 +70,19 @@ async function findOrCreateCustomer(name, email, cpf, phone, apiKey) {
 // Gera um PIX combinado para múltiplas cobranças selecionadas pelo inquilino.
 // Salva asaasChargeId + linkedChargeIds na primeira cobrança (primária).
 // O webhook e o polling marcam TODAS as cobranças como pagas ao confirmar.
-async function handleMultiChargePix(db, req, res, tenantId, chargeIds, checkOnly) {
+async function handleMultiChargePix(db, req, res, chargeIds, checkOnly, auth) {
   try {
-    const userSnap = await db.collection('users').doc(tenantId).get();
-    if (!userSnap.exists) return res.status(404).json({ error: 'Inquilino não encontrado' });
-
-    // Carrega todas as cobranças
+    // Carrega todas as cobranças (chamador já autenticado no handler)
     const chargeSnaps = await Promise.all(chargeIds.map(id => db.collection('charges').doc(id).get()));
     const valid = chargeSnaps.filter(s => s.exists && ['pending','overdue'].includes(s.data().status));
     if (!valid.length) return res.status(404).json({ error: 'Nenhuma cobrança válida encontrada' });
+
+    // SEC-FIN-02B3: CADA cobrança da lista é autorizada contra a identidade do token
+    // (inquilino dono, owner dono ou master) — fail-closed antes de qualquer baixa/QR.
+    for (const s of valid) {
+      try { await authorizeChargeAccess(db, auth, s.data()); }
+      catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
+    }
 
     // Se todas já pagas, retorna paid
     if (valid.every(s => s.data().status === 'paid')) return res.status(200).json({ paid: true });
@@ -94,6 +99,11 @@ async function handleMultiChargePix(db, req, res, tenantId, chargeIds, checkOnly
     if (!primOwner || !primTenant || !homogeneous) {
       return res.status(409).json({ error: 'Cobranças de contexto inconsistente' });
     }
+
+    // O inquilino da operação é o das COBRANÇAS (server-side), nunca o do corpo.
+    const tenantId = primTenant;
+    const userSnap = await db.collection('users').doc(tenantId).get();
+    if (!userSnap.exists) return res.status(404).json({ error: 'Inquilino não encontrado' });
 
     // Owner e chave Asaas derivados da cobrança primária (fail-closed) — sem default/master.
     let ownerId, apiKey, ownerCfg;
@@ -227,29 +237,37 @@ export default async function handler(req, res) {
     initFirebase();
     const db = getFirestore();
 
-    const { tenantId, chargeId, chargeIds, checkOnly } = req.body || {};
-    if (!tenantId) return res.status(400).json({ error: 'tenantId obrigatório' });
+    // SEC-FIN-02B3: identidade EXCLUSIVAMENTE pelo Firebase ID token. tenantId/ownerId/email do
+    // corpo não concedem nada. 401 sem/inválido/revogado; 403 conta suspensa. Autentica ANTES de
+    // qualquer lookup (sem oráculo de existência).
+    const { chargeId, chargeIds, checkOnly } = req.body || {};
+    let auth;
+    try { auth = await verifyBearer(req); await assertActiveUser(db, auth); }
+    catch (e) { return res.status(e.status || 401).json({ error: e.message }); }
 
     // ── Multi-charge: chargeIds[] enviado pelo app para PIX combinado ─────
     const isMulti = Array.isArray(chargeIds) && chargeIds.length > 1;
     if (isMulti) {
-      return handleMultiChargePix(db, req, res, tenantId, chargeIds, checkOnly);
+      return handleMultiChargePix(db, req, res, chargeIds, checkOnly, auth);
     }
-
-    // Lê dados do Firestore
-    const [userSnap, chargeSnap] = await Promise.all([
-      db.collection('users').doc(tenantId).get(),
-      chargeId ? db.collection('charges').doc(chargeId).get() : Promise.resolve({ exists: false }),
-    ]);
-
-    if (!userSnap.exists) return res.status(404).json({ error: 'Inquilino não encontrado' });
 
     // SEC-FIN-02B1 (P0-D/P0-L): exige chargeId real; sem fallback por tenantId/tenantEmail
     // e sem owner default. Owner e chave Asaas derivados exclusivamente da cobrança (fail-closed).
     if (!chargeId) return res.status(400).json({ error: 'chargeId obrigatório' });
+    const chargeSnap = await db.collection('charges').doc(chargeId).get();
     if (!chargeSnap.exists) return res.status(404).json({ error: 'Cobrança não encontrada' });
     const charge = chargeSnap.data();
     const resolvedChargeId = chargeId;
+
+    // Autorização identidade × cobrança real: master, inquilino dono ou owner dono (P0-A/P0-D).
+    try { await authorizeChargeAccess(db, auth, charge); }
+    catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
+
+    // O inquilino da operação é o da COBRANÇA (server-side), nunca o do corpo.
+    const tenantId = typeof charge.tenantId === 'string' ? charge.tenantId : '';
+    if (!tenantId) return res.status(409).json({ error: 'Cobrança sem inquilino vinculado' });
+    const userSnap = await db.collection('users').doc(tenantId).get();
+    if (!userSnap.exists) return res.status(404).json({ error: 'Inquilino não encontrado' });
 
     let ownerId, apiKey, configSnap;
     try {
