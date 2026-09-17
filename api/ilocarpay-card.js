@@ -7,7 +7,7 @@ import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore, FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getAuth }                        from 'firebase-admin/auth';
 import { getMessaging }                  from 'firebase-admin/messaging';
-import { getAsaasKey, getDefaultOwnerId, checkOwnerPlanActive } from '../lib/owner.js';
+import { getAsaasKey, getDefaultOwnerId, checkOwnerPlanActive, resolveChargeOwnerKey } from '../lib/owner.js';
 import nodemailer                         from 'nodemailer';
 
 const ASAAS_BASE = (process.env.ASAAS_API_URL || 'https://api.asaas.com/v3').replace(/\/$/, '');
@@ -2654,19 +2654,16 @@ async function handleRevokeTenant(db, body, req) {
 // Cria PIX Asaas para um documento de extra já criado no Firestore.
 // Taxa de cartão repassada ao inquilino via `enableDunning: true` e sem subsídio do owner.
 async function handleCreateExtraPix(db, body) {
-  const { chargeId, ownerId } = body;
-  if (!chargeId || !ownerId) throw Object.assign(new Error('chargeId e ownerId obrigatórios'), { status: 400 });
+  const { chargeId } = body;
+  if (!chargeId) throw Object.assign(new Error('chargeId obrigatório'), { status: 400 });
 
   const chargeSnap = await db.collection('charges').doc(chargeId).get();
   if (!chargeSnap.exists) throw Object.assign(new Error('Extra não encontrado'), { status: 404 });
   const charge = chargeSnap.data();
   if (charge.asaasChargeId) return { ok: true, skipped: 'PIX já gerado' };
 
-  const apiKey = await getAsaasKey(db, ownerId);
-  if (!apiKey) throw Object.assign(new Error('Chave Asaas não configurada'), { status: 500 });
-
-  const ownerSnap = await db.collection('owners').doc(ownerId).get();
-  const ownerCfg = ownerSnap.data() || {};
+  // SEC-FIN-02B1 (P0-C/P0-L): owner e chave derivados da cobrança; body.ownerId ignorado; fail-closed.
+  const { apiKey, owner: ownerCfg } = await resolveChargeOwnerKey(db, charge);
   const fineVal     = ownerCfg.finePercentage  ?? 2;
   const interestVal = ownerCfg.interestRate     ?? 1;
 

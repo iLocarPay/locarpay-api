@@ -4,7 +4,7 @@
 
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore }                  from 'firebase-admin/firestore';
-import { getAsaasKey, getDefaultOwnerId, checkOwnerPlanActive } from '../lib/owner.js';
+import { getAsaasKey, getDefaultOwnerId, checkOwnerPlanActive, resolveChargeOwnerKey } from '../lib/owner.js';
 
 function initFirebase() {
   if (getApps().length) return;
@@ -85,20 +85,42 @@ async function handleMultiChargePix(db, req, res, tenantId, chargeIds, checkOnly
     const primarySnap = valid[0];
     const primaryId   = primarySnap.id;
     const primaryData = primarySnap.data();
-    const ownerId     = primaryData.ownerId || await getDefaultOwnerId(db);
 
-    // checkOnly: checa status do PIX primário
+    // SEC-FIN-02B1 (P0-K/P0-B): a lista do cliente é não confiável — todas as cobranças
+    // devem ser do MESMO owner e do MESMO tenant. Sem mistura entre imobiliárias/inquilinos.
+    const primOwner  = typeof primaryData.ownerId === 'string' ? primaryData.ownerId : '';
+    const primTenant = typeof primaryData.tenantId === 'string' ? primaryData.tenantId : '';
+    const homogeneous = valid.every(s => (s.data().ownerId || '') === primOwner && (s.data().tenantId || '') === primTenant);
+    if (!primOwner || !primTenant || !homogeneous) {
+      return res.status(409).json({ error: 'Cobranças de contexto inconsistente' });
+    }
+
+    // Owner e chave Asaas derivados da cobrança primária (fail-closed) — sem default/master.
+    let ownerId, apiKey, ownerCfg;
+    try {
+      const r = await resolveChargeOwnerKey(db, primaryData);
+      ownerId = r.ownerId; apiKey = r.apiKey; ownerCfg = r.owner || {};
+    } catch (e) {
+      return res.status(e.status || 409).json({ error: e.message });
+    }
+
+    // checkOnly (P0-I): baixa SOMENTE as cobranças efetivamente cobertas pelo pagamento
+    // confirmado — a primária + linkedChargeIds gravadas no servidor —, nunca a lista do cliente.
     if (checkOnly) {
       if (primaryData.asaasChargeId) {
         try {
           const s = await fetch(`${ASAAS_BASE}/payments/${primaryData.asaasChargeId}`, {
-            headers: { 'access_token': await getAsaasKey(db, ownerId) }
+            headers: { 'access_token': apiKey }
           });
           const d = await s.json();
           if (d.status === 'RECEIVED' || d.status === 'CONFIRMED') {
-            const batch = db.batch();
-            valid.forEach(snap => batch.update(snap.ref, { status: 'paid', paidAt: new Date() }));
-            await batch.commit();
+            const covered = new Set([primaryId, ...((primaryData.linkedChargeIds || []).filter(x => typeof x === 'string'))]);
+            const toMark = valid.filter(snap => covered.has(snap.id));
+            if (toMark.length) {
+              const batch = db.batch();
+              toMark.forEach(snap => batch.update(snap.ref, { status: 'paid', paidAt: new Date() }));
+              await batch.commit();
+            }
             return res.status(200).json({ paid: true });
           }
         } catch (_) {}
@@ -108,14 +130,6 @@ async function handleMultiChargePix(db, req, res, tenantId, chargeIds, checkOnly
 
     const planCheck = await checkOwnerPlanActive(db, ownerId);
     if (!planCheck.active) return res.status(402).json({ error: 'Plano expirado' });
-
-    const [apiKey, ownerSnap] = await Promise.all([
-      getAsaasKey(db, ownerId),
-      db.collection('owners').doc(ownerId).get()
-    ]);
-    if (!apiKey) return res.status(500).json({ error: 'Chave Asaas não configurada' });
-
-    const ownerCfg = ownerSnap.exists ? (ownerSnap.data() || {}) : {};
     const finePercentage         = ownerCfg.finePercentage          ?? 2;
     const interestRate           = ownerCfg.interestRate             ?? 1;
     const monetaryCorrectionRate = ownerCfg.monetaryCorrectionRate   ?? 0.35;
@@ -230,10 +244,20 @@ export default async function handler(req, res) {
 
     if (!userSnap.exists) return res.status(404).json({ error: 'Inquilino não encontrado' });
 
-    // Resolve owner: usa ownerId da cobrança ou fallback para o primeiro owner
-    const ownerId = chargeSnap.exists
-      ? (chargeSnap.data().ownerId || await getDefaultOwnerId(db))
-      : await getDefaultOwnerId(db);
+    // SEC-FIN-02B1 (P0-D/P0-L): exige chargeId real; sem fallback por tenantId/tenantEmail
+    // e sem owner default. Owner e chave Asaas derivados exclusivamente da cobrança (fail-closed).
+    if (!chargeId) return res.status(400).json({ error: 'chargeId obrigatório' });
+    if (!chargeSnap.exists) return res.status(404).json({ error: 'Cobrança não encontrada' });
+    const charge = chargeSnap.data();
+    const resolvedChargeId = chargeId;
+
+    let ownerId, apiKey, configSnap;
+    try {
+      const r = await resolveChargeOwnerKey(db, charge);
+      ownerId = r.ownerId; apiKey = r.apiKey; configSnap = { exists: true, data: () => r.owner };
+    } catch (e) {
+      return res.status(e.status || 409).json({ error: e.message });
+    }
 
     // Verifica plano ativo
     const planCheck = await checkOwnerPlanActive(db, ownerId);
@@ -245,46 +269,10 @@ export default async function handler(req, res) {
     }
 
     // Validação cruzada: inquilino deve pertencer ao mesmo owner da cobrança
-    const userOwnerId = userSnap.data().ownerId;
+    const user = userSnap.data();
+    const userOwnerId = user.ownerId;
     if (userOwnerId && ownerId && userOwnerId !== ownerId) {
       return res.status(403).json({ error: 'Acesso negado: cobrança não pertence a este inquilino' });
-    }
-
-    const [apiKey, configSnap] = await Promise.all([
-      getAsaasKey(db, ownerId),
-      db.collection('owners').doc(ownerId).get(),
-    ]);
-    if (!apiKey) return res.status(500).json({ error: 'Chave Asaas não configurada' });
-
-    const user = userSnap.data();
-
-    // Se chargeId não existe, busca cobrança pendente do inquilino pelo tenantId
-    let charge, resolvedChargeId;
-    if (chargeSnap.exists) {
-      charge = chargeSnap.data();
-      resolvedChargeId = chargeId;
-    } else {
-      const fallbackSnap = await db.collection('charges')
-        .where('tenantId', '==', tenantId)
-        .where('status', 'in', ['pending', 'overdue'])
-        .orderBy('dueDate', 'desc')
-        .limit(1)
-        .get();
-      if (fallbackSnap.empty) {
-        // Tenta por email como último recurso
-        const emailFallback = await db.collection('charges')
-          .where('tenantEmail', '==', user.email || '')
-          .where('status', 'in', ['pending', 'overdue'])
-          .orderBy('dueDate', 'desc')
-          .limit(1)
-          .get();
-        if (emailFallback.empty) return res.status(404).json({ error: 'Cobrança não encontrada' });
-        charge = emailFallback.docs[0].data();
-        resolvedChargeId = emailFallback.docs[0].id;
-      } else {
-        charge = fallbackSnap.docs[0].data();
-        resolvedChargeId = fallbackSnap.docs[0].id;
-      }
     }
 
     // Se já está pago no Firestore, retorna imediatamente

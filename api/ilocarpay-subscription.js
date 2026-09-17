@@ -111,20 +111,40 @@ async function handlePix(db, body) {
     pixQrCode    = pix.encodedImage || '';
   } catch (_) {}
 
+  // SEC-FIN-02B1 (P0-H): grava o vínculo autoritativo paymentId → owner/plano/valor.
+  // O check-pix passa a usar este registro; o cliente não escolhe owner/plano na confirmação.
+  await db.collection('subscriptionPayments').doc(charge.id).set({
+    ownerId, plan, value: PLANS[plan].price, createdAt: FieldValue.serverTimestamp()
+  });
+
   return { paymentId: charge.id, pixCopyPaste, pixQrCode, value: PLANS[plan].price, planName: PLANS[plan].name };
 }
 
 // ── CHECK PIX ─────────────────────────────────────────────────────────────────
 async function handleCheckPix(db, body) {
-  const { paymentId, ownerId, plan } = body;
-  if (!paymentId || !ownerId) throw Object.assign(new Error('Dados inválidos'), { status: 400 });
+  const { paymentId } = body;
+  if (!paymentId) throw Object.assign(new Error('Dados inválidos'), { status: 400 });
+
+  // SEC-FIN-02B1 (P0-H): owner/plano/valor vêm do vínculo gravado na criação, nunca do corpo.
+  // Fail-closed sem vínculo, valor divergente ou já consumido (idempotência).
+  const bindSnap = await db.collection('subscriptionPayments').doc(paymentId).get();
+  if (!bindSnap.exists) throw Object.assign(new Error('Pagamento não reconhecido'), { status: 409 });
+  const bind = bindSnap.data();
+  const expected = PLANS[bind.plan]?.price;
+  if (expected == null) throw Object.assign(new Error('Plano do vínculo inválido'), { status: 409 });
+  if (bind.consumedAt) return { paid: true, plan: bind.plan };
 
   const apiKey = await getMainAsaasKey(db);
   const charge = await asaasReq('GET', `/payments/${paymentId}`, null, apiKey);
 
   if (charge.status === 'RECEIVED' || charge.status === 'CONFIRMED') {
-    await activatePlan(db, ownerId, plan);
-    return { paid: true, plan };
+    const paidValue = Number(charge.value);
+    if (!(expected > 0) || !Number.isFinite(paidValue) || Math.abs(paidValue - expected) > 0.001) {
+      throw Object.assign(new Error('Valor do pagamento divergente'), { status: 409 });
+    }
+    await activatePlan(db, bind.ownerId, bind.plan);
+    await bindSnap.ref.update({ consumedAt: FieldValue.serverTimestamp() });
+    return { paid: true, plan: bind.plan };
   }
   return { paid: false, status: charge.status };
 }
