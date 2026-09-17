@@ -6879,6 +6879,46 @@
   #overdue-tbody .btn-sm[onclick^="sendOverduePush("]:focus-visible { outline-color:var(--text2) }
   #overdue-tbody .btn-sm[onclick^="estornarCobranca("]:focus-visible { outline-color:var(--danger) }
 
+  /* ── MASTER-07A4: Inadimplência — responsividade ──
+     Abaixo de 1024px cada <tr> vira um card via CSS (mesmo markup gerado por
+     renderOverdue()); rótulos das colunas vêm de ::before. Desktop não muda. */
+  @media (max-width: 1023px) {
+    .ovd-kpis { grid-template-columns:repeat(2,minmax(0,1fr)) }
+    .ovd-kpis .kpi-card:first-child { grid-column:1 / -1 }
+    #panel-overdue .ovd-table-wrap { overflow:visible;background:transparent;border:none;border-radius:0 }
+    #panel-overdue .ovd-table-wrap table,
+    #panel-overdue .ovd-table-wrap tbody { display:block;width:100%;background:transparent }
+    #panel-overdue .ovd-table-wrap thead { display:none }
+    #overdue-tbody tr { display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:16px;row-gap:12px;align-items:start;background:var(--s2);border:1px solid var(--border);border-radius:12px;padding:14px 16px;margin-bottom:10px }
+    #overdue-tbody tr:hover td { background:transparent }
+    #overdue-tbody td { display:block;padding:0;border:none;min-width:0 }
+    #overdue-tbody td:nth-child(1) { grid-column:1 }
+    #overdue-tbody td:nth-child(1) strong,
+    #overdue-tbody td:nth-child(1) span { overflow-wrap:anywhere }
+    #overdue-tbody td:nth-child(2) { grid-column:2 }
+    #overdue-tbody td:nth-child(3) { grid-column:1 }
+    #overdue-tbody td:nth-child(4) { grid-column:2;text-align:right }
+    #overdue-tbody td:nth-child(5) { grid-column:1 / -1 }
+    #overdue-tbody td:nth-child(2)::before,
+    #overdue-tbody td:nth-child(3)::before,
+    #overdue-tbody td:nth-child(4)::before,
+    #overdue-tbody td:nth-child(5)::before { display:block;margin-bottom:4px;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--text3) }
+    #overdue-tbody td:nth-child(2)::before { content:"Valor total" }
+    #overdue-tbody td:nth-child(3)::before { content:"Vencimento" }
+    #overdue-tbody td:nth-child(4)::before { content:"Atraso" }
+    #overdue-tbody td:nth-child(5)::before { content:"Encargos (Lei 8.245/91)" }
+    #overdue-tbody td.actions { grid-column:1 / -1;display:flex;gap:8px;padding-top:12px;border-top:1px solid var(--border);text-align:left }
+    #overdue-tbody td.actions .btn-sm { flex:1 1 0;min-width:0;height:36px;margin:0 }
+    #overdue-tbody td.empty { grid-column:1 / -1;padding:40px 12px }
+    html[data-theme="light"] #overdue-tbody tr { background:#fff;border-color:rgba(0,0,0,0.08) }
+  }
+  @media (max-width: 767px) {
+    #panel-overdue { padding:24px 16px }
+    #panel-overdue .ovd-toolbar { flex-direction:column;align-items:stretch;gap:8px }
+    #panel-overdue .ovd-toolbar-group { width:100% }
+    #panel-overdue .ovd-toolbar-group .btn { flex:1 1 auto;justify-content:center }
+  }
+
   .metrics-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 24px; }
   @media (max-width: 1199px) { .metrics-row { grid-template-columns: repeat(3, 1fr); } }
   @media (max-width: 767px)  { .metrics-row { grid-template-columns: repeat(2, 1fr); } }
