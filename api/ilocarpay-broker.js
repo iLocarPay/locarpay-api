@@ -16,7 +16,7 @@ import { getMessaging }                  from 'firebase-admin/messaging';
 import { getStorage }                    from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
 import { PDFDocument as PdfLib, rgb, StandardFonts } from 'pdf-lib';
-import { requireOwnerBearer, requireMasterBearer } from '../lib/authz.js';
+import { requireOwnerBearer, requireMasterBearer, verifyBearer, isMasterEmail, assertActiveUser, assertOwner } from '../lib/authz.js';
 
 function initFirebase() {
   if (getApps().length) return;
@@ -1868,17 +1868,21 @@ async function handleCronRetryAssinafy(db) {
     if (step === 'register-broker') {
       await requireOwnerBearer(db, req, req.body?.ownerId);
     } else if (step === 'update-broker' || step === 'delete-broker') {
+      // FIX2: autentica ANTES de carregar o recurso (evita 404 pré-auth revelar existência).
+      const auth = await verifyBearer(req);
       const bId = req.body?.brokerId;
       if (!bId) throw Object.assign(new Error('brokerId obrigatório'), { status: 400 });
       const bSnap = await db.collection('brokers').doc(bId).get();
       if (!bSnap.exists) throw Object.assign(new Error('Corretor não encontrado'), { status: 404 });
-      await requireOwnerBearer(db, req, bSnap.data().ownerId);
+      if (!isMasterEmail(auth.email)) { await assertActiveUser(db, auth); await assertOwner(db, auth, bSnap.data().ownerId); }
     } else if (step === 'approve-lead') {
+      // FIX2: autentica ANTES de carregar o recurso.
+      const auth = await verifyBearer(req);
       const lId = req.body?.leadId;
       if (!lId) throw Object.assign(new Error('leadId obrigatório'), { status: 400 });
       const lSnap = await db.collection('leads').doc(lId).get();
       if (!lSnap.exists) throw Object.assign(new Error('Lead não encontrado'), { status: 404 });
-      await requireOwnerBearer(db, req, lSnap.data().ownerId);
+      if (!isMasterEmail(auth.email)) { await assertActiveUser(db, auth); await assertOwner(db, auth, lSnap.data().ownerId); }
     } else if (step === 'save-assinafy-key') {
       await requireMasterBearer(req);
     }
