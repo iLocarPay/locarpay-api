@@ -6866,6 +6866,19 @@
   #overdue-tbody td.empty { padding:56px 20px;font-size:13px;color:var(--text3) }
   #overdue-tbody td.empty[style] { color:var(--danger)!important;background:var(--danger-bg) }
 
+  /* ── MASTER-07A3: Inadimplência — hierarquia das ações das linhas ──
+     Somente CSS: os 3 botões continuam visíveis, com os mesmos onclick e textos.
+     min-width evita salto de layout quando markChargePaid() troca o texto por ⏳. */
+  #overdue-tbody td.actions { font-size:0 }
+  #overdue-tbody td.actions .btn-sm { display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:28px;min-width:64px;margin:0 0 0 6px;padding:0 10px;font-size:11px;line-height:1;vertical-align:middle }
+  #overdue-tbody td.actions .btn-sm:first-child { margin-left:0 }
+  #overdue-tbody td.actions .btn-sm:active:not(:disabled) { transform:translateY(1px) }
+  #overdue-tbody td.actions .btn-sm:disabled { opacity:.6;cursor:progress }
+  #overdue-tbody .btn-sm[onclick^="markChargePaid("] { background:rgba(16,185,129,.16);border-color:var(--accent3)!important }
+  #overdue-tbody .btn-sm[onclick^="markChargePaid("]:hover:not(:disabled) { background:rgba(16,185,129,.26) }
+  #overdue-tbody .btn-sm[onclick^="sendOverduePush("]:focus-visible { outline-color:var(--text2) }
+  #overdue-tbody .btn-sm[onclick^="estornarCobranca("]:focus-visible { outline-color:var(--danger) }
+
   .metrics-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 24px; }
   @media (max-width: 1199px) { .metrics-row { grid-template-columns: repeat(3, 1fr); } }
   @media (max-width: 767px)  { .metrics-row { grid-template-columns: repeat(2, 1fr); } }
