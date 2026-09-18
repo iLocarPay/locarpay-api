@@ -1614,80 +1614,14 @@ export default async function handler(req, res) {
 
   // Webhook da Assinafy
   if (req.method === 'POST' && req.query?.webhook === 'assinafy') {
-    try {
-      initFirebase();
-      const db = getFirestore();
-      const event      = req.body?.event || req.body?.type || '';
-      const documentId = req.body?.data?.document_id || req.body?.document_id || req.body?.data?.id || '';
-      const signerStep = req.body?.data?.signer?.step ?? req.body?.data?.step ?? null;
-      console.log('[assinafy-webhook] event:', event, 'documentId:', documentId, 'step:', signerStep, 'body:', JSON.stringify(req.body).slice(0, 400));
-
-      const isSignerSigned = event === 'signer_signed_document';
-      const isCompleted    = event === 'document_ready' || event === 'document.completed' || event === 'finished';
-
-      if ((isSignerSigned || isCompleted) && documentId) {
-        let contractSnap = await db.collection('contracts')
-          .where('assinafyDocumentId', '==', documentId).limit(1).get();
-        if (contractSnap.empty) {
-          console.warn('[assinafy-webhook] contrato NÃO encontrado por assinafyDocumentId:', documentId);
-          // Fallback: tenta pelo e-mail do signatário no payload
-          const signerEmail = req.body?.event?.signer?.email || req.body?.signer?.email || null;
-          if (signerEmail) {
-            const fallback = await db.collection('contracts')
-              .where('tenantEmail', '==', signerEmail).orderBy('createdAt', 'desc').limit(1).get();
-            if (!fallback.empty) {
-              contractSnap = fallback;
-              console.log('[assinafy-webhook] contrato encontrado via tenantEmail fallback:', signerEmail);
-            }
-          }
-        }
-        if (!contractSnap.empty) {
-          const contractDoc  = contractSnap.docs[0];
-          const contractData = contractDoc.data();
-
-          if (isCompleted) {
-            console.log('[assinafy-webhook] document_ready → atualizando contrato', contractDoc.id);
-            await contractDoc.ref.update({ assinafyStatus: 'completed', contractStatus: 'CONTRATO_ASSINADO', updatedAt: FieldValue.serverTimestamp() });
-            const leadId = contractData.leadId;
-            if (leadId) {
-              await db.collection('leads').doc(leadId).update({ bothSigned: true, contractStatus: 'CONTRATO_ASSINADO', updatedAt: FieldValue.serverTimestamp() });
-            }
-          }
-
-          // Proprietário assinou (step 1) → busca URL do inquilino e envia e-mail
-          if (isSignerSigned && (signerStep === 1 || signerStep === null)) {
-            await contractDoc.ref.update({ contractStatus: 'AGUARDANDO_INQUILINO', updatedAt: FieldValue.serverTimestamp() });
-            // Busca URL de assinatura do inquilino (step 2) na Assinafy
-            const configSnap = await db.collection('config').doc('assinafy').get();
-            const apiKey = configSnap.data()?.apiKey;
-            if (apiKey && contractData.assinafyAssignmentId) {
-              try {
-                const acctId = await getAssinafyAccount(apiKey);
-                const assignDetail = await assinafyReq('GET', `accounts/${acctId}/documents/${documentId}/assignments/${contractData.assinafyAssignmentId}`, null, apiKey);
-                const signingUrls  = assignDetail?.data?.signing_urls || assignDetail?.signing_urls || [];
-                const tenantUrl    = signingUrls.find(u => u.signer_id === contractData.assinafySignerId2)?.url || null;
-                if (tenantUrl && contractData.tenantEmail) {
-                  await sendEmail(contractData.tenantEmail, '📝 Contrato aguarda sua assinatura — iLocarPay', `
-                    <div style="font-family:Arial,sans-serif;max-width:540px;margin:0 auto;background:#f9f9f9;border-radius:12px;overflow:hidden">
-                      <div style="background:#1a1a1a;padding:32px;text-align:center"><h1 style="color:#4CAF50;margin:0;font-size:28px">iLocarPay</h1></div>
-                      <div style="padding:32px">
-                        <p>Olá, <strong>${contractData.tenantName || 'Inquilino'}</strong>!</p>
-                        <p>O proprietário assinou o contrato. Agora é a sua vez!</p>
-                        <div style="text-align:center;margin:28px 0">
-                          <a href="${tenantUrl}" style="background:#4CAF50;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;display:inline-block">✍️ Assinar contrato agora</a>
-                        </div>
-                      </div>
-                    </div>
-                  `);
-                  console.log('[assinafy-webhook] e-mail inquilino enviado para', contractData.tenantEmail);
-                }
-              } catch (e) { console.warn('[assinafy-webhook] erro ao buscar URL inquilino:', e.message); }
-            }
-          }
-        }
-      }
-    } catch (e) { console.warn('[assinafy-webhook]', e.message); }
-    return res.status(200).json({ ok: true });
+    // SEC-CONTRACT-03B1: caminho legado desabilitado (fail-closed).
+    // A conta Assinafy é configurada para chamar SOMENTE o webhook oficial
+    // /api/ilocarpay-assinafy-webhook, autenticado por ?token=ASSINAFY_WEBHOOK_SECRET.
+    // Este handler não validava token e permitia marcar contrato como CONTRATO_ASSINADO
+    // a partir de payload arbitrário (inclusive fallback por e-mail do inquilino).
+    // Nenhuma escrita é feita aqui; nenhuma integração legítima usa este caminho.
+    console.warn('[assinafy-webhook:broker] caminho legado desabilitado — requisição ignorada sem efeito');
+    return res.status(410).json({ error: 'endpoint desativado' });
   }
 
 async function handleCronRetryAssinafy(db) {
