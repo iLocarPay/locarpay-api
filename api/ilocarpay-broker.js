@@ -16,7 +16,7 @@ import { getMessaging }                  from 'firebase-admin/messaging';
 import { getStorage }                    from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
 import { PDFDocument as PdfLib, rgb, StandardFonts } from 'pdf-lib';
-import { requireOwnerBearer, requireMasterBearer, verifyBearer, isMasterEmail, assertActiveUser, assertOwner } from '../lib/authz.js';
+import { requireOwnerBearer, requireMasterBearer, verifyBearer, isMasterEmail, assertActiveUser, assertOwner, assertOwnerOrBroker } from '../lib/authz.js';
 
 function initFirebase() {
   if (getApps().length) return;
@@ -1820,6 +1820,54 @@ async function handleCronRetryAssinafy(db) {
     } else if (step === 'save-assinafy-key') {
       await requireMasterBearer(req);
     }
+    // SEC-CONTRACT-03B2: steps internos de contrato. Ordem obrigatória:
+    // autenticar -> carregar recurso -> ownership -> estado -> só então side effect externo/write.
+    // Identidade vem só do Firebase ID token; body.ownerId/tenantId/brokerId/email nunca concedem privilégio.
+    else if (step === 'generate-contract') {
+      // Bearer OBRIGATÓRIO. Corrige o side effect pré-auth (DELETE do documento na Assinafy).
+      const auth = await verifyBearer(req);
+      const cId = req.body?.contractId;
+      if (!cId) throw Object.assign(new Error('contractId obrigatório'), { status: 400 });
+      const cSnap = await db.collection('contracts').doc(cId).get();
+      if (!cSnap.exists) throw Object.assign(new Error('Contrato não encontrado'), { status: 404 });
+      if (!isMasterEmail(auth.email)) { await assertActiveUser(db, auth); await assertOwnerOrBroker(db, auth, cSnap.data().ownerId, cSnap.data().brokerEmail); }
+    } else if (step === 'mark-both-signed' || step === 'remove-lead' || step === 'reject-lead') {
+      // Ações administrativas do lead: master ou owner do lead (corretor -> 403).
+      const auth = await verifyBearer(req);
+      const lId = req.body?.leadId;
+      if (!lId) throw Object.assign(new Error('leadId obrigatório'), { status: 400 });
+      const lSnap = await db.collection('leads').doc(lId).get();
+      if (!lSnap.exists) throw Object.assign(new Error('Lead não encontrado'), { status: 404 });
+      const lead = lSnap.data();
+      if (!isMasterEmail(auth.email)) { await assertActiveUser(db, auth); await assertOwner(db, auth, lead.ownerId); }
+      if (step === 'mark-both-signed') {
+        // Estado anterior: só lead aprovado com contrato vinculado; replay é idempotente (sem novo write).
+        if (!lead.contractId || lead.status === 'rejected') throw Object.assign(new Error('Lead sem contrato aprovado'), { status: 409 });
+        req._leadAlreadyBothSigned = lead.bothSigned === true;
+      }
+    } else if (step === 'deliver-keys' || step === 'check-contract-status') {
+      // MODO DE TRANSIÇÃO — APK 360 ainda não envia Bearer nestes steps.
+      // Telemetria mínima (sem PII) para o gate do SEC-CONTRACT-03B3, que removerá o caminho legacy.
+      const hasBearer = !!(req.headers['authorization']);
+      console.log('[sec-contract-03b2-telemetry] ' + JSON.stringify({ step, hasBearer, path: hasBearer ? 'bearer' : 'legacy', ts: new Date().toISOString() }));
+      if (hasBearer) {
+        // Authorization presente: valida SEM fallback para legacy (ausente/inválido/revogado -> 401).
+        const auth = await verifyBearer(req);
+        let cData = null;
+        if (req.body?.contractId) {
+          const cSnap = await db.collection('contracts').doc(req.body.contractId).get();
+          cData = cSnap.exists ? cSnap.data() : null;
+        } else if (step === 'check-contract-status' && req.body?.assinafyDocumentId) {
+          const q = await db.collection('contracts').where('assinafyDocumentId', '==', req.body.assinafyDocumentId).limit(1).get();
+          cData = q.empty ? null : q.docs[0].data();
+        } else {
+          throw Object.assign(new Error('contractId obrigatório'), { status: 400 });
+        }
+        if (!cData) throw Object.assign(new Error('Contrato não encontrado'), { status: 404 });
+        if (!isMasterEmail(auth.email)) { await assertActiveUser(db, auth); await assertOwnerOrBroker(db, auth, cData.ownerId, cData.brokerEmail); }
+      }
+      // else: LEGACY TRANSITION PATH — comportamento atual preservado para o APK 360, sem ampliar permissões.
+    }
 
     let result;
     if      (step === 'register-broker')   result = await handleRegisterBroker(db, req.body);
@@ -1977,8 +2025,13 @@ async function handleCronRetryAssinafy(db) {
     else if (step === 'mark-both-signed') {
       const { leadId } = req.body;
       if (!leadId) throw Object.assign(new Error('leadId obrigatório'), { status: 400 });
-      await db.collection('leads').doc(leadId).update({ bothSigned: true, updatedAt: FieldValue.serverTimestamp() });
-      result = { ok: true };
+      // SEC-CONTRACT-03B2: auth/ownership/estado já validados no gate; replay não gera novo write.
+      if (req._leadAlreadyBothSigned) {
+        result = { ok: true, alreadySigned: true };
+      } else {
+        await db.collection('leads').doc(leadId).update({ bothSigned: true, updatedAt: FieldValue.serverTimestamp() });
+        result = { ok: true };
+      }
     }
     else throw Object.assign(new Error('step inválido'), { status: 400 });
     res.status(200).json(result);

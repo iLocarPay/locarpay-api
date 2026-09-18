@@ -2006,8 +2006,10 @@
     const btn = $('reject-confirm-btn');
     btn.disabled = true; btn.textContent = 'Rejeitando...';
     try {
+      if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+      const _rjTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _rjTkn },
         body: JSON.stringify({ step: 'reject-lead', leadId, reason })
       });
       const data = await res.json();
@@ -2023,8 +2025,10 @@
   window.removeLead = async (leadId) => {
     showConfirm('Tem certeza que deseja remover este lead? Esta ação não pode ser desfeita.', async () => {
       try {
+        if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+        const _rmTkn = await auth.currentUser.getIdToken();
         const res = await fetch('/api/ilocarpay-broker', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _rmTkn },
           body: JSON.stringify({ step: 'remove-lead', leadId })
         });
         const data = await res.json();
@@ -2040,8 +2044,10 @@
     if (!contractId || !tenantId) { showToast('Contrato ou inquilino não encontrado', 'error'); return; }
     showConfirm('Confirmar entrega das chaves? Isso ativa o inquilino no app.', async () => {
       try {
+        if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+        const _dkTkn = await auth.currentUser.getIdToken();
         const res = await fetch('/api/ilocarpay-broker', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _dkTkn },
           body: JSON.stringify({ step: 'deliver-keys', contractId, tenantId })
         });
         const data = await res.json();
@@ -2056,8 +2062,10 @@
   window.markBothSigned = async (leadId) => {
     showConfirm('Confirmar que ambas as partes já assinaram o contrato? O corretor poderá entregar as chaves.', async () => {
       try {
+        if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+        const _mbTkn = await auth.currentUser.getIdToken();
         const res = await fetch('/api/ilocarpay-broker', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _mbTkn },
           body: JSON.stringify({ step: 'mark-both-signed', leadId })
         });
         const data = await res.json();
@@ -2071,8 +2079,10 @@
   window.regenContract = async (contractId, btn) => {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Gerando...'; }
     try {
+      if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+      const _rgTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _rgTkn },
         body: JSON.stringify({ step: 'generate-contract', contractId })
       });
       const data = await res.json();
@@ -2085,8 +2095,10 @@
   window.generateContractForTenant = async (contractId, btn) => {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Gerando...'; }
     try {
+      if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+      const _gcTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _gcTkn },
         body: JSON.stringify({ step: 'generate-contract', contractId })
       });
       const data = await res.json();
@@ -3070,8 +3082,10 @@
         await loadTenants();
         // Chama geração automática do contrato Assinafy
         try {
+          if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+          const _ngTkn = await auth.currentUser.getIdToken();
           const res = await fetch('/api/ilocarpay-broker', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _ngTkn },
             body: JSON.stringify({ step: 'generate-contract', contractId: contractRef.id })
           });
           const data = await res.json();
