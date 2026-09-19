@@ -1583,6 +1583,36 @@ async function handleUploadDoc(db, body) {
   }
 }
 
+// SEC-CONTRACT-03B2 OBS-03: contadores diários ANÔNIMOS de adoção do Bearer em deliver-keys / check-contract-status.
+// Observacional e fail-safe: roda no finally (após a resposta), nunca lança, nunca altera status/body/autorização.
+// Só em Production (VERCEL_ENV é definido pela Vercel, não pelo cliente). Persiste SOMENTE agregados
+// (dia UTC, step, bearer|legacy, classe do status) via FieldValue.increment em _adoptionMetrics/{YYYY-MM-DD}.
+// Nenhum id, token, header, body ou PII entra no objeto gravado.
+const ADOPTION_STEPS = { 'deliver-keys': 'deliverKeys', 'check-contract-status': 'checkContractStatus' };
+function adoptionClass(status) {
+  const s = Number(status);
+  if (s >= 200 && s < 300) return '2xx';
+  if (s === 401 || s === 403 || s === 404) return String(s);
+  if (s >= 400 && s < 500) return '4xx';
+  return '5xx'; // >= 500 (1xx/3xx não ocorrem neste handler)
+}
+async function recordAdoption(meta, statusCode) {
+  try {
+    if (process.env.VERCEL_ENV !== 'production') return;
+    const step = ADOPTION_STEPS[meta && meta.step];
+    const path = meta && (meta.path === 'bearer' || meta.path === 'legacy') ? meta.path : null;
+    if (!step || !path) return;
+    const day = new Date().toISOString().slice(0, 10);
+    const write = getFirestore().collection('_adoptionMetrics').doc(day).set(
+      { [step]: { [path]: { [adoptionClass(statusCode)]: FieldValue.increment(1) } }, updatedAt: FieldValue.serverTimestamp(), env: 'production' },
+      { merge: true },
+    );
+    await Promise.race([write, sleep(1500)]);
+  } catch (e) {
+    console.warn('[adoption-metrics] write failed:', (e && e.code) || 'error');
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -1850,6 +1880,7 @@ async function handleCronRetryAssinafy(db) {
       // Telemetria mínima (sem PII) para o gate do SEC-CONTRACT-03B3, que removerá o caminho legacy.
       const hasBearer = !!(req.headers['authorization']);
       console.log('[sec-contract-03b2-telemetry] ' + JSON.stringify({ step, hasBearer, path: hasBearer ? 'bearer' : 'legacy', ts: new Date().toISOString() }));
+      req._adoption = { step, path: hasBearer ? 'bearer' : 'legacy' }; // OBS-03: contado no finally com o status final
       if (hasBearer) {
         // Authorization presente: valida SEM fallback para legacy (ausente/inválido/revogado -> 401).
         const auth = await verifyBearer(req);
@@ -2038,5 +2069,8 @@ async function handleCronRetryAssinafy(db) {
   } catch (e) {
     console.error('[ilocarpay-broker]', e.message);
     res.status(e.status || 500).json({ error: e.message });
+  } finally {
+    // OBS-03: telemetria agregada, depois da resposta já enviada; não pode alterar o resultado.
+    if (req._adoption) await recordAdoption(req._adoption, res.statusCode);
   }
 }
