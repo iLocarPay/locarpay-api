@@ -5,6 +5,9 @@
   "engines": {
     "node": "24.x"
   },
+  "scripts": {
+    "test:rules": "npm --prefix tests/rules test"
+  },
   "dependencies": {
     "firebase-admin": "^12.3.0",
     "nodemailer": "^6.9.14",
