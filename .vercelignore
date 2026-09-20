@@ -2,3 +2,9 @@ public/download/locarpay*.apk
 public/download/ilocarpay*.apk
 download/locarpay*.apk
 download/ilocarpay*.apk
+# CLEANUP-02: fora do pacote enviado à Vercel (não usados em runtime/build/api)
+public/app-release.apk
+bfg-1.15.0.jar
+tests/
+scripts/
+/*.cjs
