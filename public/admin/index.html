@@ -1347,9 +1347,11 @@
     const btn = event?.target;
     if (btn) { btn.disabled = true; btn.textContent = '🔄 Enviando...'; }
     try {
+      if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+      const _raTkn = await auth.currentUser.getIdToken();
       const res = await fetch('/api/ilocarpay-broker', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _raTkn },
         body: JSON.stringify({ step: 'retry-assinafy', contractId })
       });
       const data = await res.json();

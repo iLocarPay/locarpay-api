@@ -1,0 +1,11 @@
+{
+  "name": "ilocarpay-backend-tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Testes dos handlers de api/ com fakes em memória (sem rede, sem Firestore real)",
+  "scripts": {
+    "test": "node --loader ./loader.mjs retry-assinafy.test.mjs",
+    "mutants": "node mutants.cjs"
+  }
+}

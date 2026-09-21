@@ -28,6 +28,62 @@ const APP_BASE_URL  = process.env.APP_BASE_URL || 'https://ilocarpay.com.br';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// ── SEC-BROKER-ERR-01-V2: erros públicos controlados ──────────────────────────
+// Catálogo FECHADO dos únicos erros cujo texto pode chegar ao operador. A resposta é
+// sempre montada a partir daqui, nunca de e.message: assim nenhum caminho interno,
+// nome de variável de ambiente, credencial, id, payload de terceiro ou dado pessoal
+// consegue sair por este canal. Para entrar no catálogo a mensagem tem de ser escrita
+// à mão e ser genérica o bastante para ser pública.
+const PUBLIC_ERRORS = Object.freeze({
+  CONFIGURATION_UNAVAILABLE: Object.freeze({
+    status: 503,
+    message: 'Assinatura digital indisponível: a integração ainda não está configurada. Acione o suporte iLocarPay para concluir a configuração.',
+  }),
+  CONTRACT_DATA_INVALID: Object.freeze({
+    status: 422,
+    message: 'Proprietário e inquilino estão cadastrados com o mesmo e-mail. Cada parte precisa de um e-mail próprio para assinar o contrato.',
+  }),
+  // P0-RETRY-ASSINAFY-01: estados do reenvio (sem id de documento, e-mail ou detalhe técnico).
+  CONTRACT_ALREADY_SENT: Object.freeze({
+    status: 409,
+    message: 'Este contrato já foi enviado para assinatura digital.',
+  }),
+  RETRY_NOT_ALLOWED: Object.freeze({
+    status: 409,
+    message: 'Este contrato não está com falha de envio; não há o que reenviar.',
+  }),
+  RETRY_IN_PROGRESS: Object.freeze({
+    status: 409,
+    message: 'Já existe um envio deste contrato em andamento. Aguarde alguns minutos e atualize a tela.',
+  }),
+  RETRY_NEEDS_REVIEW: Object.freeze({
+    status: 409,
+    message: 'O envio anterior deste contrato pode ter sido concluído parcialmente. Acione o suporte iLocarPay antes de tentar novamente.',
+  }),
+  RETRY_RATE_LIMITED: Object.freeze({
+    status: 429,
+    message: 'Muitas tentativas de reenvio para este contrato. Tente novamente mais tarde.',
+  }),
+});
+
+// Cria um erro explicitamente publicável. `technical` existe só para o log do servidor
+// e nunca vai para a resposta; não deve conter segredo, id nem dado pessoal.
+// P0-RETRY-ASSINAFY-01: a marca de publicável é um Symbol privado deste módulo — erro vindo
+// de terceiro/lib (mesmo com expose/code forjados) nunca consegue se passar por público.
+const PUBLIC_ERROR = Symbol('ilocarpay.publicError');
+function publicError(code, technical) {
+  const spec = PUBLIC_ERRORS[code];
+  if (!spec) return Object.assign(new Error('Erro interno'), { status: 500 });
+  return Object.assign(new Error(spec.message), { status: spec.status, code, technical: technical || code, [PUBLIC_ERROR]: true });
+}
+
+// Só é publicável o erro criado por publicError (Symbol privado) e com code do catálogo.
+function publicSpecOf(e) {
+  return (e && e[PUBLIC_ERROR] === true && typeof e.code === 'string' && Object.prototype.hasOwnProperty.call(PUBLIC_ERRORS, e.code))
+    ? PUBLIC_ERRORS[e.code]
+    : null;
+}
+
 // CEP helpers — formato canônico: 8 dígitos sem máscara
 function normalizeCep(value) {
   return String(value || '').replace(/\D/g, '');
@@ -838,10 +894,11 @@ async function handleApproveLead(db, body) {
 
 // ── GENERATE CONTRACT (Assinafy) ──────────────────────────────────────────────
 
-async function createAssinafyContract(db, contractId, data) {
+async function createAssinafyContract(db, contractId, data, hooks = {}) {
   const configSnap = await db.collection('config').doc('assinafy').get();
   const apiKey = configSnap.data()?.apiKey;
-  if (!apiKey) throw new Error('Chave Assinafy não configurada em config/assinafy');
+  // V2: o operador precisa saber que falta configuração, mas sem aprender onde ela mora.
+  if (!apiKey) throw publicError('CONFIGURATION_UNAVAILABLE', 'credencial da assinatura digital ausente na configuração');
 
   const accountId = await getAssinafyAccount(apiKey);
 
@@ -862,10 +919,14 @@ async function createAssinafyContract(db, contractId, data) {
     getOrCreateSigner(apiKey, accountId, data.tenantName || 'Inquilino',    data.tenantEmail),
   ]);
   if (!s1Id || !s2Id) throw new Error('Assinafy não retornou IDs dos signatários');
-  if (s1Id === s2Id) throw new Error(`Proprietário e inquilino têm o mesmo e-mail (${data.ownerEmail}). Use e-mails diferentes para cada parte.`);
+  // V2: mesma orientação de antes, sem ecoar o e-mail (dado pessoal) na resposta nem no log.
+  if (s1Id === s2Id) throw publicError('CONTRACT_DATA_INVALID', 'signatários idênticos: ownerEmail igual a tenantEmail');
 
   // 3. Cria assignment (sequencial: proprietário step 1, inquilino step 2)
   // Assinafy auto-envia o e-mail de assinatura ao criar o assignment
+  // P0-RETRY-ASSINAFY-01: ponto sem volta. Quem chama (reenvio) marca o lock como
+  // comprometido ANTES do POST: se a resposta se perder, não haverá segundo envio automático.
+  if (typeof hooks.beforeNotify === 'function') await hooks.beforeNotify();
   const assignRes = await assinafyReq('POST', `documents/${documentId}/assignments`, {
     method:  'virtual',
     message: `Por favor, assine o contrato de locação do imóvel ${data.propertyAddress || ''}.`.trim(),
@@ -1043,8 +1104,11 @@ async function handleGenerateContract(db, body) {
     }
     result = await createAssinafyContract(db, contractId, { ...contractPdfData, tenantPhone });
   } catch (e) {
-    console.error('[generate-contract] Assinafy error:', e.message);
-    throw Object.assign(new Error('Falha ao enviar ao Assinafy: ' + e.message), { status: 500 });
+    console.error('[generate-contract] Assinafy error:', e && e.message);
+    // V2: erro do catálogo sobe intacto (é o que orienta o operador). Qualquer outra falha
+    // sobe sem status e vira 500 'Erro interno' no catch geral — a resposta crua do
+    // terceiro fica só no log, nunca concatenada na mensagem devolvida.
+    throw e;
   }
 
   // Envia PDF do contrato por e-mail ao proprietário (sempre, independente da Assinafy)
@@ -1654,6 +1718,70 @@ export default async function handler(req, res) {
     return res.status(410).json({ error: 'endpoint desativado' });
   }
 
+// ── P0-RETRY-ASSINAFY-01: reenvio idempotente ao Assinafy ─────────────────────
+// Estado no próprio contracts/{id}, campo assinafyRetry (só backend/Admin SDK escreve):
+//   { lockBy: 'master'|'owner'|'cron', lockAt, lockUntil, committed, windowStart, attempts }
+// Adquirido em TRANSAÇÃO (serializa chamadas concorrentes):
+//   - contrato com assinafyDocumentId            -> 409 CONTRACT_ALREADY_SENT (nada é refeito)
+//   - assinafyStatus diferente de 'error'        -> 409 RETRY_NOT_ALLOWED
+//   - committed === true (o POST que dispara e-mail já foi tentado) -> 409 RETRY_NEEDS_REVIEW,
+//     sem expiração: só revisão manual libera (fail-closed contra e-mail duplicado)
+//   - lock ativo (lockUntil > agora)             -> 409 RETRY_IN_PROGRESS
+//   - lock expirado e não comprometido           -> recuperado (dono morreu: RETRY_LOCK_MS >
+//     maxDuration de 300s do broker em vercel.json)
+//   - mais de RETRY_MAX_ATTEMPTS aquisições na janela -> 429 RETRY_RATE_LIMITED
+// Sucesso só é registrado por createAssinafyContract depois da resposta do assignment
+// (assinafyDocumentId + status 'sent'); falha antes do ponto sem volta libera o lock.
+const RETRY_LOCK_MS = 6 * 60 * 1000;
+const RETRY_WINDOW_MS = 60 * 60 * 1000;
+const RETRY_MAX_ATTEMPTS = 5;
+// Recusas do lock: no cron significam "outro caminho cuida deste contrato", não falha.
+const RETRY_SKIP_CODES = new Set(['CONTRACT_ALREADY_SENT', 'RETRY_NOT_ALLOWED', 'RETRY_IN_PROGRESS', 'RETRY_NEEDS_REVIEW', 'RETRY_RATE_LIMITED']);
+
+async function acquireAssinafyRetry(db, ref, holder) {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw Object.assign(new Error('Contrato não encontrado'), { status: 404 });
+    const c = snap.data() || {};
+    if (c.assinafyDocumentId) throw publicError('CONTRACT_ALREADY_SENT', 'retry: contrato já possui documento');
+    if (c.assinafyStatus !== 'error') throw publicError('RETRY_NOT_ALLOWED', 'retry: assinafyStatus fora de error');
+    const r = (c.assinafyRetry && typeof c.assinafyRetry === 'object') ? c.assinafyRetry : {};
+    if (r.committed === true) throw publicError('RETRY_NEEDS_REVIEW', 'retry: tentativa anterior passou do ponto sem volta');
+    const now = Date.now();
+    if (typeof r.lockUntil === 'number' && r.lockUntil > now) throw publicError('RETRY_IN_PROGRESS', 'retry: lock ativo');
+    const inWindow = typeof r.windowStart === 'number' && now - r.windowStart < RETRY_WINDOW_MS;
+    const attempts = inWindow && typeof r.attempts === 'number' ? r.attempts : 0;
+    if (attempts >= RETRY_MAX_ATTEMPTS) throw publicError('RETRY_RATE_LIMITED', 'retry: limite de tentativas na janela');
+    const lock = { lockBy: holder, lockAt: now, lockUntil: now + RETRY_LOCK_MS, committed: false,
+                   windowStart: inWindow ? r.windowStart : now, attempts: attempts + 1 };
+    tx.update(ref, { assinafyRetry: lock });
+    return { contract: c, lock };
+  });
+}
+
+// Executa um reenvio sob o lock. buildData(contrato lido na transação) monta o payload.
+async function runAssinafyRetry(db, contractId, holder, buildData) {
+  const ref = db.collection('contracts').doc(contractId);
+  const { contract, lock } = await acquireAssinafyRetry(db, ref, holder);
+  let pastNoReturn = false;
+  try {
+    const result = await createAssinafyContract(db, contractId, buildData(contract), {
+      beforeNotify: async () => {
+        pastNoReturn = true;
+        try { await ref.update({ assinafyRetry: { ...lock, committed: true } }); }
+        catch (e) { console.error('[assinafy-retry] falha ao marcar ponto sem volta:', e && e.message); }
+      },
+    });
+    await ref.update({ assinafyError: null, assinafyRetry: FieldValue.delete(), updatedAt: FieldValue.serverTimestamp() });
+    return result;
+  } catch (e) {
+    try {
+      await ref.update({ assinafyRetry: pastNoReturn ? { ...lock, committed: true } : { ...lock, lockUntil: 0 } });
+    } catch (e2) { console.error('[assinafy-retry] falha ao liberar lock:', e2 && e2.message); }
+    throw e;
+  }
+}
+
 async function handleCronRetryAssinafy(db) {
   // Busca contratos com erro Assinafy criados nas últimas 48h
   const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
@@ -1679,7 +1807,8 @@ async function handleCronRetryAssinafy(db) {
       const p = lead.property || {};
       const landlord = lead.landlord || {};
       const propAddr = buildAddr(p);
-      await createAssinafyContract(db, contractId, {
+      // P0-RETRY-ASSINAFY-01: mesmo lock do reenvio manual; contrato bloqueado é pulado (catch).
+      await runAssinafyRetry(db, contractId, 'cron', (c) => ({
         contractId,
         ownerName:       landlord.name       || c.landlordName    || '',
         ownerEmail:      landlord.email      || c.landlordEmail   || '',
@@ -1695,12 +1824,12 @@ async function handleCronRetryAssinafy(db) {
         startDate:       c.startDate         || p.startDate       || '',
         endDate:         c.endDate           || p.endDate         || '',
         deposit:         c.deposit           || parseFloat(p.deposit) || 0,
-      });
-      await contractSnap.ref.update({ assinafyError: null, updatedAt: FieldValue.serverTimestamp() });
+      }));
       console.log('[cron-retry-assinafy] sucesso:', contractId);
       retried++;
     } catch (e) {
-      console.error('[cron-retry-assinafy] falhou novamente:', contractId, e.message);
+      if (e && RETRY_SKIP_CODES.has(e.code)) { console.log('[cron-retry-assinafy] pulado:', contractId, e.code); continue; }
+      console.error('[cron-retry-assinafy] falhou novamente:', contractId, e && e.message);
       failed++;
     }
     await sleep(2000);
@@ -1720,7 +1849,11 @@ async function handleCronRetryAssinafy(db) {
         const db = getFirestore();
         const result = await handleWaKeepalive(db);
         return res.status(200).json(result);
-      } catch (e) { return res.status(500).json({ error: e.message }); }
+      } catch (e) {
+        // SEC-BROKER-ERR-01: falha inesperada não vaza detalhe interno na resposta.
+        console.error('[ilocarpay-broker:wa-keepalive]', e && e.message);
+        return res.status(500).json({ error: 'Erro interno' });
+      }
     }
     if (view === 'contract' && contractId) {
       try {
@@ -1739,7 +1872,11 @@ async function handleCronRetryAssinafy(db) {
         });
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         return res.status(200).send(html);
-      } catch (e) { return res.status(500).send(e.message); }
+      } catch (e) {
+        // SEC-BROKER-ERR-01: o HTML do contrato é público para a Assinafy — nunca devolver o erro cru.
+        console.error('[ilocarpay-broker:view-contract]', e && e.message);
+        return res.status(500).send('Erro interno');
+      }
     }
     return res.status(200).json({ ok: true, endpoint: 'ilocarpay-broker' });
   }
@@ -1756,7 +1893,9 @@ async function handleCronRetryAssinafy(db) {
       const result = await handleCronRetryAssinafy(db);
       return res.status(200).json(result);
     } catch (e) {
-      return res.status(500).json({ error: e.message });
+      // SEC-BROKER-ERR-01: falha inesperada não vaza detalhe interno na resposta.
+      console.error('[ilocarpay-broker:cron-retry-assinafy]', e && e.message);
+      return res.status(500).json({ error: 'Erro interno' });
     }
   }
 
@@ -1853,6 +1992,24 @@ async function handleCronRetryAssinafy(db) {
     // SEC-CONTRACT-03B2: steps internos de contrato. Ordem obrigatória:
     // autenticar -> carregar recurso -> ownership -> estado -> só então side effect externo/write.
     // Identidade vem só do Firebase ID token; body.ownerId/tenantId/brokerId/email nunca concedem privilégio.
+    else if (step === 'retry-assinafy') {
+      // P0-RETRY-ASSINAFY-01: Bearer OBRIGATÓRIO (antes não havia autenticação nenhuma).
+      // Papéis: master (authz canônico) ou owner ATIVO da imobiliária do contrato — os mesmos de
+      // approve-lead, a operação que faz o envio original. Corretor não reenvia.
+      // Contrato inexistente OU de outro escopo -> 404 idêntico (não enumera contratos).
+      const auth = await verifyBearer(req);
+      await assertActiveUser(db, auth);
+      const cId = req.body?.contractId;
+      if (!cId || typeof cId !== 'string') throw Object.assign(new Error('contractId obrigatório'), { status: 400 });
+      const notFound = () => Object.assign(new Error('Contrato não encontrado'), { status: 404 });
+      const cSnap = await db.collection('contracts').doc(cId).get();
+      if (!cSnap.exists) throw notFound();
+      if (isMasterEmail(auth.email)) req._retryHolder = 'master';
+      else {
+        try { await assertOwner(db, auth, cSnap.data().ownerId); } catch (_) { throw notFound(); }
+        req._retryHolder = 'owner';
+      }
+    }
     else if (step === 'generate-contract') {
       // Bearer OBRIGATÓRIO. Corrige o side effect pré-auth (DELETE do documento na Assinafy).
       const auth = await verifyBearer(req);
@@ -2017,13 +2174,10 @@ async function handleCronRetryAssinafy(db) {
       result = { ok: true };
     }
     else if (step === 'retry-assinafy') {
-      // Reenviar contrato ao Assinafy quando a primeira tentativa falhou
+      // Reenviar contrato ao Assinafy quando a primeira tentativa falhou.
+      // P0-RETRY-ASSINAFY-01: autenticação/escopo já validados no gate; o reenvio roda sob lock
+      // transacional (runAssinafyRetry) e nunca devolve id de documento em erro.
       const { contractId } = req.body;
-      if (!contractId) throw Object.assign(new Error('contractId obrigatório'), { status: 400 });
-      const contractSnap = await db.collection('contracts').doc(contractId).get();
-      if (!contractSnap.exists) throw Object.assign(new Error('Contrato não encontrado'), { status: 404 });
-      const c = contractSnap.data();
-      if (c.assinafyDocumentId) throw Object.assign(new Error('Contrato já enviado ao Assinafy: ' + c.assinafyDocumentId), { status: 409 });
       // Busca lead para reconstruir os dados
       const leadsSnap = await db.collection('leads').where('contractId', '==', contractId).limit(1).get();
       if (leadsSnap.empty) throw Object.assign(new Error('Lead não encontrado para este contrato'), { status: 404 });
@@ -2032,7 +2186,7 @@ async function handleCronRetryAssinafy(db) {
       const p = lead.property || {};
       const landlord = lead.landlord || {};
       const propAddr = buildAddr(p);
-      const assinafyResult = await createAssinafyContract(db, contractId, {
+      const assinafyResult = await runAssinafyRetry(db, contractId, req._retryHolder, (c) => ({
         contractId,
         ownerName:       landlord.name || c.landlordName || '',
         ownerEmail:      landlord.email || c.landlordEmail || '',
@@ -2048,9 +2202,7 @@ async function handleCronRetryAssinafy(db) {
         startDate:       c.startDate || p.startDate || '',
         endDate:         c.endDate || p.endDate || '',
         deposit:         c.deposit || parseFloat(p.deposit) || 0,
-      });
-      // Limpa o erro anterior
-      await contractSnap.ref.update({ assinafyError: null, updatedAt: FieldValue.serverTimestamp() });
+      }));
       result = { ok: true, assinafyDocumentId: assinafyResult?.documentId || null };
     }
     else if (step === 'mark-both-signed') {
@@ -2067,8 +2219,15 @@ async function handleCronRetryAssinafy(db) {
     else throw Object.assign(new Error('step inválido'), { status: 400 });
     res.status(200).json(result);
   } catch (e) {
-    console.error('[ilocarpay-broker]', e.message);
-    res.status(e.status || 500).json({ error: e.message });
+    const pub = publicSpecOf(e);
+    console.error('[ilocarpay-broker]', pub ? e.code + ': ' + e.technical : (e && e.message));
+    // SEC-BROKER-ERR-01: erros ESPERADOS (400/401/403/404/409/422/429/...) carregam { status } e
+    // mensagem própria do fluxo — seguem intactos. Falha inesperada (sem status) vira 500
+    // genérico: o detalhe fica só no log, nunca na resposta.
+    // V2: erro do catálogo responde com status, code e mensagem FIXOS do catálogo.
+    if (pub) res.status(pub.status).json({ error: pub.message, code: e.code });
+    else if (e && e.status) res.status(e.status).json({ error: e.message });
+    else res.status(500).json({ error: 'Erro interno' });
   } finally {
     // OBS-03: telemetria agregada, depois da resposta já enviada; não pode alterar o resultado.
     if (req._adoption) await recordAdoption(req._adoption, res.statusCode);
