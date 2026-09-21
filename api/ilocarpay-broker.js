@@ -17,6 +17,9 @@ import { getStorage }                    from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
 import { PDFDocument as PdfLib, rgb, StandardFonts } from 'pdf-lib';
 import { requireOwnerBearer, requireMasterBearer, verifyBearer, isMasterEmail, assertActiveUser, assertOwner, assertOwnerOrBroker } from '../lib/authz.js';
+// PROPERTIES-02A: módulo Imóveis (lib/, não é endpoint próprio — plano Hobby limita a 12 funções).
+// Ele autentica e autoriza por conta própria em handlePropertyStep; nada aqui concede privilégio.
+import { PROPERTY_STEPS, handlePropertyStep } from '../lib/properties.js';
 
 function initFirebase() {
   if (getApps().length) return;
@@ -1901,7 +1904,11 @@ async function handleCronRetryAssinafy(db) {
     }
 
     let result;
-    if      (step === 'register-broker')   result = await handleRegisterBroker(db, req.body);
+    // PROPERTIES-02A: steps do módulo Imóveis. A autenticação/autorização acontece uma única
+    // vez dentro de handlePropertyStep (nada do corpo concede privilégio); nenhum step antigo
+    // é afetado e o gate acima não trata property-*.
+    if      (PROPERTY_STEPS.has(step))     result = await handlePropertyStep(db, req, step);
+    else if (step === 'register-broker')   result = await handleRegisterBroker(db, req.body);
     else if (step === 'update-broker')     result = await handleUpdateBroker(db, req.body);
     else if (step === 'delete-broker')     result = await handleDeleteBroker(db, req.body);
     else if (step === 'resend-invite')     result = await handleResendInvite(db, req.body);

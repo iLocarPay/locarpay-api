@@ -1,9 +1,12 @@
-// PROPERTIES-02A — suíte do backend de Imóveis (api/ilocarpay-properties.js).
+// PROPERTIES-02A — suíte do módulo Imóveis (lib/properties.js), exercitado pelo handler real
 // Sem rede, sem Firestore real: fakes em memória e identidades fictícias.
 import { reset, seed, store, spies, all } from './fakes.mjs';
+import { getFirestore } from './m-firestore.mjs';
 
-const HANDLER = new URL('../../api/ilocarpay-properties.js', import.meta.url).href;
-const handler = (await import(HANDLER)).default;
+// O módulo é exercitado pelo caminho REAL: o handler do broker, que expõe os steps property-*.
+const handler = (await import(new URL('../../api/ilocarpay-broker.js', import.meta.url).href)).default;
+const mod = await import(new URL('../../lib/properties.js', import.meta.url).href);
+const OPS = ['create', 'get', 'list', 'update', 'archive', 'restore'];
 
 let pass = 0, fail = 0;
 const results = [];
@@ -27,9 +30,15 @@ const mkRes = () => ({
 
 // Todas as mensagens de erro devolvidas ao cliente, para auditoria de PII ao final.
 const seenErrors = [];
+// Traduz o step curto usado nos casos para o step público do broker (property-<op>).
+const toPublicStep = (body) => {
+  if (!body || typeof body.step !== 'string' || !OPS.includes(body.step)) return body;
+  return { ...body, step: 'property-' + body.step };
+};
 const call = async (body, headers = {}, method = 'POST') => {
   const res = mkRes();
-  await handler({ method, body: body === undefined ? undefined : { ...body }, headers, query: {}, socket: {} }, res);
+  const b = body === undefined ? undefined : toPublicStep({ ...body });
+  await handler({ method, body: b, headers, query: {}, socket: {} }, res);
   if (res.body && typeof res.body.error === 'string') seenErrors.push(res.body.error);
   return res;
 };
@@ -84,8 +93,14 @@ r = await call({ step: 'list' }, H.ownerSusp);
 ok('owner suspenso -> 403', r.statusCode === 403, JSON.stringify(r.body));
 r = await call({ step: 'list' }, H.brokerOff);
 ok('corretor inativo -> 403', r.statusCode === 403, JSON.stringify(r.body));
+// GET não executa step de imóvel: o broker responde o próprio healthcheck e nada é lido/escrito.
+base();
 r = await call({ step: 'list' }, H.ownerA, 'GET');
-ok('método GET -> 405', r.statusCode === 405, JSON.stringify(r.body));
+ok('GET não executa operação de imóvel', r.statusCode === 200 && !r.body.properties && !store.get('properties'), JSON.stringify(r.body));
+r = await call({ step: 'create', ...CREATE }, H.ownerA, 'GET');
+ok('GET não cria imóvel', !store.get('properties') || store.get('properties').size === 0);
+r = await call({ step: 'list' }, H.ownerA, 'PUT');
+ok('método não permitido (PUT) -> 405', r.statusCode === 405, JSON.stringify(r.body));
 r = await call({ step: 'list' }, H.ownerA, 'OPTIONS');
 ok('OPTIONS -> 200 (CORS)', r.statusCode === 200);
 r = await call({ step: 'nope' }, H.ownerA);
@@ -312,6 +327,50 @@ for (let i = 0; i < 62; i++) {
 ok('excesso de escritas -> 429', got429, 'status vistos: ' + statuses.slice(-3).join(','));
 r = await call({ step: 'list' }, H.ownerA);
 ok('leitura não é bloqueada pelo rate limit de escrita', r.statusCode === 200, JSON.stringify(r.body));
+
+// ── 13. integração pelo broker: steps fechados e módulo sem endpoint público ──
+base();
+ok('PROPERTY_STEPS expõe exatamente os 6 steps property-*', [...mod.PROPERTY_STEPS].sort().join(',') === OPS.map((o) => 'property-' + o).sort().join(','), [...mod.PROPERTY_STEPS].join(','));
+ok('módulo em lib/ não exporta handler HTTP (default)', mod.default === undefined);
+ok('módulo exporta as operações de serviço', ['handleCreate', 'handleGet', 'handleList', 'handleUpdate', 'handleArchive', 'handleRestore', 'handlePropertyStep', 'resolveCaller'].every((k) => typeof mod[k] === 'function'));
+r = await call({ step: 'property-nao-existe' }, H.ownerA);
+ok('step property-* desconhecido -> 400', r.statusCode === 400, JSON.stringify(r.body));
+// Contrato do módulo em si (defesa em profundidade): mesmo chamado diretamente, só aceita
+// os steps do conjunto fechado e nunca executa uma operação sem step válido.
+{
+  const db = getFirestore();
+  let caught = null;
+  try { await mod.handlePropertyStep(db, { body: { ...CREATE, step: 'property-qualquer' }, headers: H.ownerA }, 'property-qualquer'); }
+  catch (e) { caught = e; }
+  ok('módulo rejeita step fora do conjunto fechado (chamada direta) -> 400', caught && caught.status === 400, caught && caught.message);
+  ok('step inválido não executa operação nenhuma', !store.get('properties') || store.get('properties').size === 0);
+}
+r = await call({ step: 'property-create' }, H.none);
+ok('step de imóvel sem autenticação -> 401', r.statusCode === 401, JSON.stringify(r.body));
+// cada step chama exatamente a sua operação (e nenhuma outra)
+base();
+r = await call({ step: 'property-create', ...CREATE, step: 'property-create' }, H.ownerA);
+const criado = r.body && r.body.property;
+ok('property-create cria (e só cria)', r.statusCode === 200 && !!criado && store.get('properties').size === 1, JSON.stringify(r.body));
+const pid = criado.propertyId;
+r = await call({ step: 'property-get', propertyId: pid }, H.ownerA);
+ok('property-get lê sem alterar', r.statusCode === 200 && r.body.property.propertyId === pid && store.get('properties').size === 1);
+r = await call({ step: 'property-list' }, H.ownerA);
+ok('property-list lista sem alterar', r.statusCode === 200 && Array.isArray(r.body.properties) && store.get('properties').size === 1);
+r = await call({ step: 'property-archive', propertyId: pid }, H.ownerA);
+ok('property-archive arquiva (soft delete)', r.statusCode === 200 && store.get('properties').get(pid).status === 'ARCHIVED' && store.get('properties').size === 1);
+r = await call({ step: 'property-restore', propertyId: pid }, H.ownerA);
+ok('property-restore restaura', r.statusCode === 200 && store.get('properties').get(pid).status === 'AVAILABLE');
+r = await call({ step: 'property-update', propertyId: pid, notes: 'ok' }, H.ownerA);
+ok('property-update edita', r.statusCode === 200 && store.get('properties').get(pid).notes === 'ok');
+// steps antigos do broker seguem funcionando e não são afetados
+base();
+r = await call({ step: 'deliver-keys', contractId: 'inexistente', tenantId: 'x' }, H.none);
+ok('step antigo (deliver-keys) preservado: legacy chega ao lookup -> 404', r.statusCode === 404, JSON.stringify(r.body));
+r = await call({ step: 'generate-contract', contractId: 'x' }, H.none);
+ok('step antigo (generate-contract) preservado: 401 sem token', r.statusCode === 401, JSON.stringify(r.body));
+r = await call({ step: 'nope-inexistente' }, H.ownerA);
+ok('step desconhecido do broker -> 400', r.statusCode === 400, JSON.stringify(r.body));
 
 // ── relatório ────────────────────────────────────────────────────────────────
 console.error = origError;

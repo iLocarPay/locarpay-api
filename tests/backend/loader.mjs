@@ -8,6 +8,10 @@ const MAP = {
   'firebase-admin/app': 'm-app.mjs',
   'firebase-admin/auth': 'm-auth.mjs',
   'firebase-admin/firestore': 'm-firestore.mjs',
+  'firebase-admin/messaging': 'm-messaging.mjs',
+  'firebase-admin/storage': 'm-storage.mjs',
+  nodemailer: 'm-nodemailer.mjs',
+  'pdf-lib': 'm-pdf.mjs',
 };
 
 export async function resolve(specifier, context, next) {
