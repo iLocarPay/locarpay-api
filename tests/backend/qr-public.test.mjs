@@ -66,8 +66,8 @@ for (const [nome, extra] of SEM_OWNER) {
     const r = await call({ step: 'whatsapp-qr', ...extra });
     disarmTimers(); spies.failCollections.clear(); setEnv(true);
     const tag = `${nome} (${envOn ? 'com' : 'sem'} variáveis do Evolution)`;
-    ok(`2/4/5. ${tag}: 400 fixo, zero chamada ao provedor`, r.statusCode === 400 && r.body.error === 'ownerId obrigatório' && net.calls.length === 0, `${r.statusCode} ${J(r)} calls=${net.calls.length}`);
-    ok(`6/7. ${tag}: recusa antes de ler Firestore (owners indisponível não muda a resposta)`, r.statusCode === 400);
+    ok(`2/4/5. ${tag}: anônimo -> 401 fixo (WHATSAPP-MT-02), zero chamada ao provedor`, r.statusCode === 401 && r.body.error === 'Nao autorizado' && net.calls.length === 0, `${r.statusCode} ${J(r)} calls=${net.calls.length}`);
+    ok(`6/7. ${tag}: recusa antes de ler Firestore (owners indisponível não muda a resposta)`, r.statusCode === 401);
     ok(`12. ${tag}: nenhum timer/polling iniciado`, timers.timeout === 0 && timers.interval === 0, JSON.stringify(timers));
     ok(`13/15. ${tag}: resposta só { error } sem QR/instância/estado/URL/telefone`, Object.keys(r.body).join() === 'error' && !VAZA.test(J(r)), J(r));
   }
@@ -84,8 +84,8 @@ for (const m of ['GET', 'PUT', 'DELETE', 'PATCH']) {
 
 // ════ 16-17. fluxos operacionais inalterados ════
 base();
-const rp = await call({ step: 'whatsapp-qr', ownerId: 'ownerA' });
-ok('16. fluxo do painel (com ownerId) segue igual: instância própria já aberta -> connected', rp.statusCode === 200 && rp.body.connected === true, J(rp));
+const rp = await call({ step: 'whatsapp-qr', ownerId: 'ownerA' }, { authorization: 'Bearer valid:owner-a@example.test' });
+ok('16. fluxo do painel (admin autenticado, WHATSAPP-MT-02): instância própria já aberta -> connected', rp.statusCode === 200 && rp.body.connected === true, J(rp));
 ok('16b. fluxo do painel consulta só a instância da própria imobiliária', net.calls.length === 1 && /connectionState\/owner_ownerA$/.test(net.calls[0].u), JSON.stringify(net.calls));
 base();
 const rw = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });

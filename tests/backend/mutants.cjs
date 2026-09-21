@@ -1,4 +1,4 @@
-// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01).
+// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01, WHATSAPP-MT-02).
 // Um defeito por vez; as suítes TÊM de falhar.
 // Uso: cd tests/backend && node mutants.cjs  (restaura os arquivos ao final, mesmo com falha).
 const { execSync } = require('child_process');
@@ -13,7 +13,7 @@ const VCJ = W + 'vercel.json';
 const QRP = W + 'public/qr/index.html';
 const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
 const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8'), [OWN]: fs.readFileSync(OWN, 'utf8'), [VCJ]: fs.readFileSync(VCJ, 'utf8') };
-const SUITES = ['qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
+const SUITES = ['whatsapp-qr.test.mjs', 'qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
 const toCrlf = (t) => t.split(CR + LF).join(LF).split(LF).join(CR + LF);
 
 const M = [
@@ -99,14 +99,35 @@ const M = [
   [OWN, 'OWNER/SAN: e.message de falha inesperada volta à resposta', "    console.error('[setup-webhook] falha inesperada:', (e && e.name) || 'erro');\n    throw providerDown();", "    throw e;"],
   [OWN, 'OWNER/SAN: resposta crua do provedor volta ao cliente', "    if (!createResp.ok) { console.error('[setup-webhook] Asaas create status', createResp.status); throw providerDown(); }", "    if (!createResp.ok) throw Object.assign(new Error(await createResp.text()), { status: 502 });"],
   [OWN, 'OWNER/SAN: sucesso volta a devolver dados do provedor', "    return { ok: true, action: 'created' };", "    return { ok: true, action: 'created', webhookId: created.id, url: BILLING_WEBHOOK_URL, events };"],
-  // ══ P0-QR-PUBLIC-01: caminho 'sem ownerId -> instância global' fechado ══
-  [BRK, 'QR/GUARD: guard removido (volta a instância global)', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });\n", ''],
-  [BRK, 'QR/GUARD: guard só vale sem variáveis do Evolution', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId && !process.env.EVOLUTION_INSTANCE) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
-  [BRK, 'QR/ORDEM: provedor inicializado antes do guard', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId) { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/connectionState/${c.instance}`).catch(() => {}); }\n  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
-  [BRK, 'QR/ORDEM: Firestore lido antes do guard', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  await db.collection('owners').doc(ownerId || 'x').get();\n  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
-  [BRK, 'QR/STATUS: guard devolve 200 em vez de 400', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId) return { ok: false };"],
-  [BRK, 'QR/SAN: resposta revela a instância global', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório (instância ' + process.env.EVOLUTION_INSTANCE + ')'), { status: 400 });"],
-  [BRK, 'QR/TIMER: polling iniciado antes do guard', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  setTimeout(() => {}, 1);\n  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
+  // ══ WHATSAPP-MT-02: QR autenticado por imobiliária ══
+  [BRK, "MT02/AUTH: autenticação removida (identidade vinda do corpo)", "  const auth = await verifyBearer(req);\n  await assertActiveUser(db, auth);\n  const deny", "  const auth = { uid: 'anon', email: String((req.body && req.body.email) || '') };\n  const deny"],
+  [BRK, "MT02/AUTH: bypass de usuário suspenso", "  const auth = await verifyBearer(req);\n  await assertActiveUser(db, auth);\n  const deny", "  const auth = await verifyBearer(req);\n  const deny"],
+  [BRK, "MT02/PAPEL: corretor passa a acessar a imobiliária dele", "  const q = await db.collection('owners').where('email', '==', auth.email).limit(2).get();", "  const q = await (async () => { const o = await db.collection('owners').where('email', '==', auth.email).limit(2).get(); if (o.size) return o; const b = await db.collection('brokers').where('email', '==', auth.email).limit(1).get(); if (b.empty) return o; const s = await db.collection('owners').doc(b.docs[0].data().ownerId).get(); return { size: 1, docs: [s] }; })();"],
+  [BRK, "MT02/PAPEL: vínculo ambíguo aceito (primeira imobiliária)", "  if (q.size !== 1) throw deny();", "  if (q.size < 1) throw deny();"],
+  [BRK, "MT02/PAPEL: imobiliária suspensa aceita", "  if (ownerData.status === 'suspended') throw deny();\n  // Compatibilidade", "  // Compatibilidade"],
+  [BRK, "MT02/ESCOPO: ownerId do corpo escolhe a organização", "  const doc = q.docs[0];", "  const doc = (req.body && typeof req.body.ownerId === 'string') ? await db.collection('owners').doc(req.body.ownerId).get() : q.docs[0];"],
+  [BRK, "MT02/ESCOPO: ownerId divergente deixa de dar 404", "  if (asked !== undefined && asked !== null && asked !== '' && asked !== doc.id) {", "  if (false) {"],
+  [BRK, "MT02/ESCOPO: instanceId do corpo escolhe a instância", "      result = await handleWhatsappQr(db, req._waOrg);", "      result = await handleWhatsappQr(db, { ...req._waOrg, ownerData: { ...req._waOrg.ownerData, evolutionInstance: req.body.instanceId || req._waOrg.ownerData.evolutionInstance } });"],
+  [BRK, "MT02/INST: sem instância cai na instância global", "  const inst = typeof org.ownerData.evolutionInstance === 'string' ? org.ownerData.evolutionInstance.trim() : '';", "  const inst = (typeof org.ownerData.evolutionInstance === 'string' && org.ownerData.evolutionInstance.trim()) || String(process.env.EVOLUTION_INSTANCE || '').trim();"],
+  [BRK, "MT02/INST: instância igual à da plataforma aceita", "  if (globalInst && inst === globalInst) throw", "  if (false) throw"],
+  [BRK, "MT02/INST: instância compartilhada entre imobiliárias aceita", "  if (dup.size !== 1) throw", "  if (false) throw"],
+  [BRK, "MT02/NAO-DESTRUTIVO: cria instância quando ausente", "  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-qr: organização sem instância vinculada');", "  if (!inst) { const c = getEvoConfig(org.ownerData, org.ownerId); await makeEvoFetch(c.baseUrl, c.apiKey)('instance/create', { method: 'POST', body: '{}' }).catch(() => {}); throw publicError('WHATSAPP_NOT_PROVISIONED', 'x'); }"],
+  [BRK, "MT02/NAO-DESTRUTIVO: provedor 404 apaga e recria", "    if (!st.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: connectionState status ' + st.status);", "    if (!st.ok) { await evoFetch(`instance/delete/${inst}`, { method: 'DELETE' }).catch(() => {}); await evoFetch('instance/create', { method: 'POST', body: '{}' }).catch(() => {}); throw publicError('PROVIDER_UNAVAILABLE', 'x'); }"],
+  [BRK, "MT02/NAO-DESTRUTIVO: conectado ainda gera novo QR", "    if (state === 'open') {\n      if (org.ownerData.whatsappConnected !== true) {", "    if (false) {\n      if (org.ownerData.whatsappConnected !== true) {"],
+  [BRK, "MT02/ORDEM: provedor chamado antes da autorização", "      req._waOrg = await resolveWhatsappAdmin(db, req);", "      { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/connectionState/${c.instance}`).catch(() => {}); }\n      req._waOrg = await resolveWhatsappAdmin(db, req);"],
+  [BRK, "MT02/RATE: limite removido", "      if (count >= limits[k]) throw", "      if (false) throw"],
+  [BRK, "MT02/LOCK: lock por organização removido", "    if (typeof org.lockUntil === 'number' && org.lockUntil > now) throw publicError('TOOL_BUSY'", "    if (false) throw publicError('TOOL_BUSY'"],
+  [BRK, "MT02/QR: Cache-Control no-store removido", "      res.setHeader('Cache-Control', 'no-store, private, max-age=0');", "      res.setHeader('Cache-Control', 'public, max-age=60');"],
+  [BRK, "MT02/QR: payload completo do provedor devolvido", "    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN };", "    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN, ...cj };"],
+  [BRK, "MT02/QR: QR registrado no log", "    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN };", "    console.log('[wa-qr]', qr);\n    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN };"],
+  [BRK, "MT02/QR: QR persistido no Firestore", "    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN };", "    await db.collection('owners').doc(org.ownerId).update({ lastQr: qr }).catch(() => {});\n    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN };"],
+  [BRK, "MT02/QR: QR malformado aceito", "    if (typeof qr !== 'string' || qr.length > WA_QR_MAX_LEN || !WA_QR_DATA_URL.test(qr)) {", "    if (typeof qr !== 'string') {"],
+  [BRK, "MT02/QR: QR acima do tamanho máximo aceito", "    if (typeof qr !== 'string' || qr.length > WA_QR_MAX_LEN || !WA_QR_DATA_URL.test(qr)) {", "    if (typeof qr !== 'string' || !WA_QR_DATA_URL.test(qr)) {"],
+  [BRK, "MT02/SAN: e.message do provedor volta à resposta", "    console.error('[wa-qr] falha do provedor:', (e && e.name) || 'erro');\n    throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: falha de rede');", "    throw Object.assign(new Error(e.message), { status: 502 });"],
+  [ADM, "MT02/CALLER: painel deixa de enviar o Bearer", "        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _qrTkn },\n        body: JSON.stringify({ step: 'whatsapp-qr', ownerId: _qrOwnerId })", "        method: 'POST', headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify({ step: 'whatsapp-qr', ownerId: _qrOwnerId })"],
+  [ADM, "MT02/CALLER: painel volta a logar a resposta do QR", "      const data = await res.json();\n      if (!res.ok) { const he = new Error", "      const data = await res.json();\n      console.log('[whatsapp-qr] response:', JSON.stringify(data).slice(0, 200));\n      if (!res.ok) { const he = new Error"],
+  [ADM, "MT02/CALLER: fechar o modal não remove o QR", "  $('btn-wa-modal-close').addEventListener('click', () => _closeWhatsappQr());", "  $('btn-wa-modal-close').addEventListener('click', () => { _clearQrTimers(); $('modal-whatsapp-qr').style.display = 'none'; });"],
+  // ══ P0-QR-PUBLIC-01: rota pública ══
   [VCJ, 'QR/ROTA: rewrite /qr reintroduzido', '"rewrites": [', '"rewrites": [\n    { "source": "/qr", "destination": "/api/ilocarpay-broker" },'],
 ];
 

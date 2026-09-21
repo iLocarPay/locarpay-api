@@ -2,11 +2,12 @@
 // Cobre o subconjunto do Admin SDK usado pelo backend: doc/collection/where/orderBy/
 // startAfter/limit/get/set/update/delete, runTransaction e os sentinels de FieldValue.
 export const store = new Map(); // collection -> Map(id -> data)
-export const spies = { writes: 0, failCollections: new Set() };
+export const spies = { writes: 0, failCollections: new Set(), reads: [] };
 
 export function reset() {
   store.clear();
   spies.writes = 0;
+  spies.reads = [];
   spies.failCollections = new Set();
 }
 
@@ -57,6 +58,7 @@ class DocRef {
   constructor(name, id) { this.__c = name; this.id = id; }
   async get() {
     guard(this.__c);
+    spies.reads.push(this.__c + '/' + this.id); // espião de leitura por documento
     const m = col(this.__c);
     const has = m.has(this.id);
     return { exists: has, id: this.id, ref: this, data: () => (has ? clone(m.get(this.id)) : undefined) };
@@ -90,6 +92,7 @@ class Query {
   limit(n) { return new Query(this.__c, this.__f, this.__o, n, this.__a); }
   async get() {
     guard(this.__c);
+    spies.reads.push(this.__c + '?' + JSON.stringify(this.__f)); // espião de consulta
     let docs = all(this.__c).filter(({ data }) => this.__f.every(([f, op, v]) => {
       const val = f.split('.').reduce((o, k) => (o == null ? undefined : o[k]), data);
       if (op === '==') return val === v;

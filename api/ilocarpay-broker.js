@@ -86,6 +86,15 @@ const PUBLIC_ERRORS = Object.freeze({
     status: 429,
     message: 'Limite de uso desta ferramenta atingido. Tente novamente mais tarde.',
   }),
+  // WHATSAPP-MT-02: QR por imobiliária. Nunca revelam instância, estado de outra org ou provedor.
+  WHATSAPP_NOT_PROVISIONED: Object.freeze({
+    status: 409,
+    message: 'O WhatsApp ainda não está habilitado para esta imobiliária. Acione o suporte iLocarPay.',
+  }),
+  WHATSAPP_CONFIG_INVALID: Object.freeze({
+    status: 409,
+    message: 'A configuração do WhatsApp desta imobiliária precisa de revisão. Acione o suporte iLocarPay.',
+  }),
 });
 
 // Cria um erro explicitamente publicável. `technical` existe só para o log do servidor
@@ -1405,103 +1414,112 @@ function makeEvoFetch(baseUrl, apiKey) {
   };
 }
 
-async function ensureEvoInstance(evoFetch, instance) {
-  // Cria instância se não existir
-  try {
-    const r = await evoFetch(`instance/create`, {
-      method: 'POST',
-      body: JSON.stringify({ instanceName: instance, qrcode: true, integration: 'WHATSAPP-BAILEYS' }),
-    });
-    const d = await r.json().catch(() => ({}));
-    console.log('[evo] create instance:', JSON.stringify(d).slice(0, 200));
-  } catch (e) {
-    console.warn('[evo] create instance error (pode já existir):', e.message);
+// ── WHATSAPP-MT-02: QR do WhatsApp da PRÓPRIA imobiliária ─────────────────────
+// Antes: anônimo; o ownerId do corpo escolhia a instância, sem ownerId caía na instância global,
+// gravava evolutionInstance, apagava/recriava instâncias "travadas" e registrava o QR no log.
+// Agora (fase transitória): só o ADMIN ativo, com a organização derivada do token; só a instância
+// JÁ vinculada no doc owners; nunca cria, apaga, renomeia ou recria instância; nunca usa a
+// instância global; QR validado, devolvido com allowlist e nunca persistido ou registrado.
+const WA_QR_ORG_LIMIT = 40;
+const WA_QR_USER_LIMIT = 40;
+const WA_QR_GLOBAL_LIMIT = 300;
+const WA_QR_WINDOW_MS = 10 * 60 * 1000;
+const WA_QR_LOCK_MS = 60 * 1000; // lock abandonado expira sozinho após 60 s
+const WA_QR_MAX_LEN = 64 * 1024;
+const WA_QR_EXPIRES_IN = 25;
+const WA_QR_DATA_URL = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+const WA_QR_RAW_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+// Organização do ADMIN autenticado. Fonte canônica: owners/{id}.email == e-mail do token — o mesmo
+// critério de isOwnerOf (Rules), assertOwner e do login OTP. Nada do corpo escolhe a organização.
+async function resolveWhatsappAdmin(db, req) {
+  const auth = await verifyBearer(req);
+  await assertActiveUser(db, auth);
+  const deny = () => Object.assign(new Error('Acesso negado'), { status: 403 });
+  if (!auth.email) throw deny();
+  const q = await db.collection('owners').where('email', '==', auth.email).limit(2).get();
+  // 0 -> não é administrador (corretor, inquilino, proprietário, sem papel); 2 -> vínculo ambíguo.
+  if (q.size !== 1) throw deny();
+  const doc = q.docs[0];
+  const ownerData = doc.data() || {};
+  if (ownerData.status === 'suspended') throw deny();
+  // Compatibilidade: o painel ainda envia ownerId como ASSERÇÃO (nunca como identidade).
+  // Diferente do derivado -> 404 fixo, sem ler nada da outra organização.
+  const asked = req.body ? req.body.ownerId : undefined;
+  if (asked !== undefined && asked !== null && asked !== '' && asked !== doc.id) {
+    throw Object.assign(new Error('Recurso não encontrado'), { status: 404 });
   }
+  return { auth, ownerId: doc.id, ownerData };
 }
 
-async function handleWhatsappQr(db, body) {
-  const rawId = body.ownerId;
-  const ownerId = (rawId && typeof rawId === 'string' && rawId !== 'undefined' && rawId.trim()) ? rawId.trim() : null;
-  // P0-QR-PUBLIC-01: sem ownerId o step caía na instância GLOBAL da plataforma — caminho usado só
-  // pela página pública /qr (removida). Recusa antes de qualquer leitura, configuração ou provedor.
-  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });
-
-  let ownerData = null;
-  if (ownerId) {
-    const snap = await db.collection('owners').doc(ownerId).get();
-    ownerData = snap.exists ? snap.data() : null;
-  }
-
-  const { baseUrl, apiKey, instance } = getEvoConfig(ownerData, ownerId);
-  if (!baseUrl || !apiKey) {
-    throw Object.assign(new Error('Evolution API não configurada no servidor'), { status: 500 });
-  }
-
-  // Indica se esta instância já estava vinculada a este owner antes desta chamada
-  const instanceAlreadyRegistered = !!(ownerData?.evolutionInstance);
-
-  // Persiste a instância no owner se ainda não estava salva
-  if (ownerId && ownerData && !ownerData.evolutionInstance) {
-    await db.collection('owners').doc(ownerId).update({ evolutionInstance: instance })
-      .then(() => console.log(`[whatsapp-qr] evolutionInstance salvo: ${instance} → owner ${ownerId}`))
-      .catch(e => console.error(`[whatsapp-qr] ERRO ao salvar evolutionInstance:`, e.message, e.code));
-  }
-
-  const evoFetch = makeEvoFetch(baseUrl, apiKey);
-
-  // Verifica estado da instância
-  const statusRes = await evoFetch(`instance/connectionState/${instance}`);
-  const statusText = await statusRes.text();
-  let statusData;
-  try { statusData = JSON.parse(statusText); } catch { statusData = {}; }
-  const state = statusData?.instance?.state || statusData?.state;
-  console.log(`[whatsapp-qr] ownerId=${ownerId} instance=${instance} state=${state} registered=${instanceAlreadyRegistered}`);
-
-  if (state === 'open' && instanceAlreadyRegistered) {
-    // Só considera conectado se esta instância já estava vinculada a este owner
-    if (ownerId) {
-      await db.collection('owners').doc(ownerId).update({
-        whatsappConnected: true,
-        whatsappInstance: instance,
-        whatsappConnectedAt: new Date().toISOString(),
-      }).catch(() => {});
+async function acquireWhatsappQrSlot(db, ownerId, uid) {
+  const col = db.collection('_toolRateLimits');
+  const refs = { org: col.doc('wa-qr-org-' + ownerId), user: col.doc('wa-qr-user-' + uid), global: col.doc('wa-qr-global') };
+  const limits = { org: WA_QR_ORG_LIMIT, user: WA_QR_USER_LIMIT, global: WA_QR_GLOBAL_LIMIT };
+  await db.runTransaction(async (tx) => {
+    const now = Date.now();
+    const snaps = {};
+    for (const k of Object.keys(refs)) snaps[k] = await tx.get(refs[k]);
+    const org = snaps.org.exists ? (snaps.org.data() || {}) : {};
+    if (typeof org.lockUntil === 'number' && org.lockUntil > now) throw publicError('TOOL_BUSY', 'wa-qr: consulta em andamento');
+    const next = {};
+    for (const k of Object.keys(refs)) {
+      const d = snaps[k].exists ? (snaps[k].data() || {}) : {};
+      const inWindow = typeof d.windowStart === 'number' && now - d.windowStart < WA_QR_WINDOW_MS;
+      const count = inWindow && typeof d.count === 'number' ? d.count : 0;
+      if (count >= limits[k]) throw publicError('TOOL_RATE_LIMITED', 'wa-qr: limite ' + k);
+      next[k] = { windowStart: inWindow ? d.windowStart : now, count: count + 1 };
     }
-    return { ok: true, connected: true, instance };
-  }
+    tx.set(refs.org, { ...next.org, lockUntil: now + WA_QR_LOCK_MS });
+    tx.set(refs.user, next.user);
+    tx.set(refs.global, next.global);
+  });
+  return refs.org;
+}
 
-  // Instância não existe (404), não está open, ou é recém-gerada — cria/reconecta
-  const needsCreate = statusRes.status === 404 || !state || (state === 'open' && !instanceAlreadyRegistered);
-  // Instância travada em "connecting" ou "close" — deletar e recriar do zero
-  const isStuck = state === 'connecting' || state === 'close';
-  if (needsCreate || isStuck) {
-    if (isStuck) {
-      console.log(`[whatsapp-qr] instância ${instance} travada (${state}) — deletando para recriar`);
-      // Tenta logout e delete ignorando qualquer erro — servidor pode rejeitar/abortar
-      try { await evoFetch(`instance/logout/${instance}`, { method: 'DELETE' }); } catch {}
-      await sleep(500);
-      try { await evoFetch(`instance/delete/${instance}`, { method: 'DELETE' }); } catch {}
-      await sleep(800);
+async function handleWhatsappQr(db, org) {
+  const inst = typeof org.ownerData.evolutionInstance === 'string' ? org.ownerData.evolutionInstance.trim() : '';
+  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-qr: organização sem instância vinculada');
+  const globalInst = String(process.env.EVOLUTION_INSTANCE || '').trim();
+  if (globalInst && inst === globalInst) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-qr: instância igual à da plataforma');
+  const dup = await db.collection('owners').where('evolutionInstance', '==', inst).limit(2).get();
+  if (dup.size !== 1) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-qr: instância compartilhada ou inconsistente');
+  const { baseUrl, apiKey } = getEvoConfig(org.ownerData, org.ownerId);
+  if (!baseUrl || !apiKey) throw publicError('INTEGRATION_NOT_CONFIGURED', 'wa-qr: evolution sem configuração');
+
+  const slot = await acquireWhatsappQrSlot(db, org.ownerId, org.auth.uid);
+  try {
+    const evoFetch = makeEvoFetch(baseUrl, apiKey);
+    const st = await evoFetch(`instance/connectionState/${encodeURIComponent(inst)}`);
+    // 404 ou erro: falha fechada — nunca cria, apaga ou recria instância.
+    if (!st.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: connectionState status ' + st.status);
+    const sj = await st.json().catch(() => null);
+    const state = sj && ((sj.instance && sj.instance.state) || sj.state);
+    if (state === 'open') {
+      if (org.ownerData.whatsappConnected !== true) {
+        await db.collection('owners').doc(org.ownerId).update({
+          whatsappConnected: true, whatsappInstance: inst, whatsappConnectedAt: new Date().toISOString(),
+        }).catch(() => {});
+      }
+      return { ok: true, connected: true };
     }
-    // Cria instância — ignora erro 403 "já existe" (ensureEvoInstance já trata isso)
-    await ensureEvoInstance(evoFetch, instance);
-    await sleep(2000);
+    const cr = await evoFetch(`instance/connect/${encodeURIComponent(inst)}`);
+    if (!cr.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: connect status ' + cr.status);
+    const cj = await cr.json().catch(() => null);
+    let qr = cj && (cj.base64 || (cj.qrcode && cj.qrcode.base64));
+    if (typeof qr === 'string' && WA_QR_RAW_B64.test(qr)) qr = 'data:image/png;base64,' + qr;
+    if (typeof qr !== 'string' || qr.length > WA_QR_MAX_LEN || !WA_QR_DATA_URL.test(qr)) {
+      throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: QR ausente ou malformado');
+    }
+    // allowlist: só o QR e o prazo; nada do payload do provedor além disso.
+    return { ok: true, connected: false, qr, expiresIn: WA_QR_EXPIRES_IN };
+  } catch (e) {
+    if (e && e.status) throw e;
+    console.error('[wa-qr] falha do provedor:', (e && e.name) || 'erro');
+    throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: falha de rede');
+  } finally {
+    try { await slot.update({ lockUntil: 0 }); } catch (_) { console.error('[wa-qr] falha ao liberar lock'); }
   }
-
-  // Busca QR Code — tenta até 2 vezes se vier vazio
-  let base64 = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const qrRes  = await evoFetch(`instance/connect/${instance}`);
-    const qrText = await qrRes.text();
-    let qrData = {};
-    try { qrData = JSON.parse(qrText); } catch {}
-    console.log(`[whatsapp-qr] connect attempt ${attempt + 1}:`, JSON.stringify(qrData).slice(0, 300));
-    base64 = qrData?.base64 || qrData?.qrcode?.base64 || qrData?.code
-          || qrData?.data?.base64 || qrData?.data?.qrcode?.base64;
-    if (base64) break;
-    if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
-  }
-
-  return { ok: true, connected: false, base64, state, instance };
 }
 
 async function handleWhatsappDisconnect(db, body) {
@@ -2052,6 +2070,13 @@ async function handleCronRetryAssinafy(db) {
     // SEC-CONTRACT-03B2: steps internos de contrato. Ordem obrigatória:
     // autenticar -> carregar recurso -> ownership -> estado -> só então side effect externo/write.
     // Identidade vem só do Firebase ID token; body.ownerId/tenantId/brokerId/email nunca concedem privilégio.
+    else if (step === 'whatsapp-qr') {
+      // WHATSAPP-MT-02: QR é credencial efêmera — nenhuma resposta deste step pode ser cacheada.
+      res.setHeader('Cache-Control', 'no-store, private, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      req._waOrg = await resolveWhatsappAdmin(db, req);
+    }
     else if (BROKER_TOOL_STEPS.has(step)) {
       // P0-BROKER-OPEN-STEPS-01: ferramentas administrativas — somente master (authz canônico).
       // Sem token/revogado -> 401; autenticado sem ser master -> 403. Nada do corpo concede papel.
@@ -2142,7 +2167,7 @@ async function handleCronRetryAssinafy(db) {
     else if (step === 'upload-doc')        result = await handleUploadDoc(db, req.body);
     else if (step === 'get-signed-url')    result = await handleGetSignedReadUrl(req.body, req._storageBucket);
     else if (step === 'whatsapp-qr') {
-      result = await handleWhatsappQr(db, req.body);
+      result = await handleWhatsappQr(db, req._waOrg);
     }
     else if (step === 'setup-webhook') {
       // P0-BROKER-OPEN-STEPS-01: master-only (gate). ownerId só escolhe a instância; URL, eventos e

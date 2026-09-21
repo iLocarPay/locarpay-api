@@ -313,8 +313,9 @@ base(); {
   const trecho = src.slice(src.indexOf('const PUBLIC_ERRORS'), src.indexOf('// CEP helpers'));
   const { PUBLIC_ERRORS, PUBLIC_ERROR, publicError, publicSpecOf } = new Function(trecho + '; return { PUBLIC_ERRORS, PUBLIC_ERROR, publicError, publicSpecOf };')();
   // 7 codes do reenvio/sanitização + 5 das ferramentas administrativas (P0-BROKER-OPEN-STEPS-01).
-  const TOOL_CODES = ['INTEGRATION_NOT_CONFIGURED', 'PROVIDER_UNAVAILABLE', 'RECIPIENT_NOT_ALLOWED', 'TOOL_BUSY', 'TOOL_RATE_LIMITED'];
-  ok('22c. catálogo congelado com exatamente os 12 codes esperados', Object.isFrozen(PUBLIC_ERRORS) && Object.keys(PUBLIC_ERRORS).sort().join() === [...Object.keys(CATALOG), ...TOOL_CODES].sort().join(), Object.keys(PUBLIC_ERRORS).join());
+  // + 2 do QR por imobiliária (WHATSAPP-MT-02).
+  const TOOL_CODES = ['INTEGRATION_NOT_CONFIGURED', 'PROVIDER_UNAVAILABLE', 'RECIPIENT_NOT_ALLOWED', 'TOOL_BUSY', 'TOOL_RATE_LIMITED', 'WHATSAPP_NOT_PROVISIONED', 'WHATSAPP_CONFIG_INVALID'];
+  ok('22c. catálogo congelado com exatamente os 14 codes esperados', Object.isFrozen(PUBLIC_ERRORS) && Object.keys(PUBLIC_ERRORS).sort().join() === [...Object.keys(CATALOG), ...TOOL_CODES].sort().join(), Object.keys(PUBLIC_ERRORS).join());
   ok('22c. catálogo do broker == catálogo esperado (status e mensagem)', Object.entries(CATALOG).every(([k, [s, m]]) => PUBLIC_ERRORS[k].status === s && PUBLIC_ERRORS[k].message === m));
   const inv = publicError('QUALQUER', 'x');
   ok('22c. publicError com code fora do catálogo -> 500 genérico não publicável', inv.status === 500 && inv.message === 'Erro interno' && publicSpecOf(inv) === null);

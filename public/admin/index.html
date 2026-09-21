@@ -3717,6 +3717,14 @@
     if (_qrCountdown) { clearInterval(_qrCountdown); _qrCountdown = null; }
   }
   window._clearQrTimers = _clearQrTimers;
+  // WHATSAPP-MT-02: fechar o modal para o polling e remove o QR da tela (credencial efêmera).
+  function _closeWhatsappQr() {
+    _clearQrTimers();
+    const img = $('whatsapp-qr-img');
+    if (img) { img.removeAttribute('src'); img.style.display = 'none'; }
+    $('modal-whatsapp-qr').style.display = 'none';
+  }
+  window._closeWhatsappQr = _closeWhatsappQr;
   window._fetchQr = _fetchQr;
   window.openWhatsappQr = openWhatsappQr;
 
@@ -3742,22 +3750,20 @@
     const timerEl = $('whatsapp-qr-timer');
     const connEl  = $('whatsapp-qr-connected');
     _clearQrTimers();
+    // QR anterior nunca é reaproveitado: some da tela antes de cada nova consulta.
+    img.removeAttribute('src'); img.style.display = 'none';
     try {
       status.textContent = '⏳ Buscando QR Code...';
+      // WHATSAPP-MT-02: Bearer obrigatório; a imobiliária é derivada do token no servidor.
+      // ownerId segue só como asserção (outra imobiliária -> 404), nunca como identidade.
+      if (!auth.currentUser) { const se = new Error('Sessão expirada. Entre novamente.'); se.httpStatus = 401; throw se; }
+      const _qrTkn = await auth.currentUser.getIdToken();
       const res  = await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _qrTkn },
         body: JSON.stringify({ step: 'whatsapp-qr', ownerId: _qrOwnerId })
       });
       const data = await res.json();
-      console.log('[whatsapp-qr] response:', JSON.stringify(data).slice(0, 200));
-      if (!res.ok) throw new Error(data.error || 'Erro ' + res.status);
-
-      // Atualiza instância no cache local (backend salva no Firestore, front precisa saber)
-      if (data.instance && _qrOwnerId === currentOwnerId && !currentOwnerData?.evolutionInstance) {
-        currentOwnerData = { ...currentOwnerData, evolutionInstance: data.instance };
-        const found = allOwners?.find(o => o.id === _qrOwnerId);
-        if (found) found.evolutionInstance = data.instance;
-      }
+      if (!res.ok) { const he = new Error(data.error || 'Erro ' + res.status); he.httpStatus = res.status; throw he; }
 
       if (data.connected) {
         img.style.display = 'none';
@@ -3766,7 +3772,7 @@
         status.textContent = '✅ WhatsApp conectado com sucesso!';
         _updateOwnerWhatsappBadge(_qrOwnerId, true);
         if (_qrOwnerId === currentOwnerId) {
-          currentOwnerData = { ...currentOwnerData, whatsappConnected: true, evolutionInstance: data.instance || currentOwnerData?.evolutionInstance };
+          currentOwnerData = { ...currentOwnerData, whatsappConnected: true };
           const found = allOwners?.find(o => o.id === _qrOwnerId);
           if (found) { found.whatsappConnected = true; }
           loadConfigTab();
@@ -3774,9 +3780,8 @@
         return;
       }
 
-      if (data.base64) {
-        const src = data.base64.startsWith('data:') ? data.base64 : 'data:image/png;base64,' + data.base64;
-        img.src = src;
+      if (typeof data.qr === 'string' && data.qr.startsWith('data:image/png;base64,')) {
+        img.src = data.qr;
         img.style.display = 'block';
         status.textContent = '📷 Escaneie: WhatsApp → ⋮ → Aparelhos conectados → Conectar';
         // Contador regressivo 25s
@@ -3791,11 +3796,18 @@
           if (secs <= 0) { clearInterval(_qrCountdown); _fetchQr(); }
         }, 1000);
       } else {
-        status.textContent = `⚠️ Sem QR (state:${data.state||'?'} base64:${!!data.base64}) — tentando novamente...`;
-        _qrTimer = setTimeout(_fetchQr, 3000);
+        status.textContent = '⚠️ QR indisponível no momento — tentando novamente em 30s...';
+        _qrTimer = setTimeout(_fetchQr, 30000);
       }
     } catch (e) {
-      const isServerDown = e.message?.includes('aborted') || e.message?.includes('fetch') || e.message?.includes('network');
+      // 401: sessão expirada -> pede novo login, sem nova tentativa.
+      if (e.httpStatus === 401) { $('whatsapp-qr-status').textContent = 'Sessão expirada. Entre novamente para conectar o WhatsApp.'; return; }
+      // 403/404/409 (sem permissão, outra imobiliária, não habilitado): mensagem do servidor, sem polling.
+      if (e.httpStatus && e.httpStatus !== 429 && e.httpStatus !== 503 && !(e.httpStatus === 409 && /execução/.test(e.message))) {
+        $('whatsapp-qr-status').textContent = e.message;
+        return;
+      }
+      const isServerDown = !!e.httpStatus || e.message?.includes('aborted') || e.message?.includes('fetch') || e.message?.includes('network');
       if (isServerDown) {
         $('whatsapp-qr-status').textContent = '🔴 Servidor WhatsApp offline. Reconectando automaticamente...';
         let wait = 30;
@@ -3808,7 +3820,7 @@
         }, 1000);
       } else {
         $('whatsapp-qr-status').textContent = 'Erro: ' + e.message;
-        _qrTimer = setTimeout(_fetchQr, 5000);
+        _qrTimer = setTimeout(_fetchQr, 30000);
       }
     }
   }
@@ -5980,7 +5992,8 @@
   const modalUpgrade = $('modal-upgrade');
   if (modalUpgrade) modalUpgrade.addEventListener('click', e => { if (e.target === modalUpgrade) upgClose(); });
   $('docs-modal-close').addEventListener('click', () => { $('modal-docs').style.display = 'none'; });
-  $('btn-wa-modal-close').addEventListener('click', () => { _clearQrTimers(); $('modal-whatsapp-qr').style.display = 'none'; });
+  $('btn-wa-modal-close').addEventListener('click', () => _closeWhatsappQr());
+  $('modal-whatsapp-qr').addEventListener('click', (e) => { if (e.target === e.currentTarget) _closeWhatsappQr(); });
 
   // Saudação dinâmica: primeira visita vs. retorno
   (function() {
