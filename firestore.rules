@@ -225,6 +225,19 @@ service cloud.firestore {
       allow delete: if isMaster();
     }
 
+    // ── properties (PROPERTIES-02A) ───────────────────────────────────────────
+    // Imóveis são operados EXCLUSIVAMENTE pelo backend (Admin SDK, que ignora estas Rules).
+    // Nenhum cliente lê ou escreve direto: autenticação, isolamento por ownerId e allowlist de
+    // campos ficam em api/ilocarpay-properties.js. Deny-all explícito (não depende do catch-all).
+    match /properties/{propertyId} {
+      allow read, write: if false;
+    }
+
+    // ── _counters (sequências server-side, ex.: propertyCode) ─────────────────
+    match /_counters/{docId} {
+      allow read, write: if false;
+    }
+
     // ── _rateLimits ───────────────────────────────────────────────────────────
     match /_rateLimits/{docId} {
       allow read, write: if false;

@@ -91,6 +91,42 @@
         { "fieldPath": "brokerId",      "order": "ASCENDING" },
         { "fieldPath": "lastMessageAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "properties",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerId",      "order": "ASCENDING" },
+        { "fieldPath": "propertyCode", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "properties",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerId",      "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" },
+        { "fieldPath": "propertyCode", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "properties",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerId",      "order": "ASCENDING" },
+        { "fieldPath": "type",         "order": "ASCENDING" },
+        { "fieldPath": "propertyCode", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "properties",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "ownerId",      "order": "ASCENDING" },
+        { "fieldPath": "status",       "order": "ASCENDING" },
+        { "fieldPath": "type",         "order": "ASCENDING" },
+        { "fieldPath": "propertyCode", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

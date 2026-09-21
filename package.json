@@ -6,7 +6,8 @@
     "node": "24.x"
   },
   "scripts": {
-    "test:rules": "npm --prefix tests/rules test"
+    "test:rules": "npm --prefix tests/rules test",
+    "test:backend": "npm --prefix tests/backend test"
   },
   "dependencies": {
     "firebase-admin": "^12.3.0",
