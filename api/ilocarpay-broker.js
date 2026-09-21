@@ -1422,6 +1422,9 @@ async function ensureEvoInstance(evoFetch, instance) {
 async function handleWhatsappQr(db, body) {
   const rawId = body.ownerId;
   const ownerId = (rawId && typeof rawId === 'string' && rawId !== 'undefined' && rawId.trim()) ? rawId.trim() : null;
+  // P0-QR-PUBLIC-01: sem ownerId o step caía na instância GLOBAL da plataforma — caminho usado só
+  // pela página pública /qr (removida). Recusa antes de qualquer leitura, configuração ou provedor.
+  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });
 
   let ownerData = null;
   if (ownerId) {

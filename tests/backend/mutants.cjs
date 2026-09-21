@@ -1,4 +1,4 @@
-// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01 + P0-BROKER-OPEN-STEPS-01 + P0-OWNER-WEBHOOK-SECRET-01).
+// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01).
 // Um defeito por vez; as suítes TÊM de falhar.
 // Uso: cd tests/backend && node mutants.cjs  (restaura os arquivos ao final, mesmo com falha).
 const { execSync } = require('child_process');
@@ -9,9 +9,11 @@ const BRK = W + 'api/ilocarpay-broker.js';
 const ADM = W + 'public/admin/index.html';
 const ALZ = W + 'lib/authz.js';
 const OWN = W + 'api/ilocarpay-owner.js';
+const VCJ = W + 'vercel.json';
+const QRP = W + 'public/qr/index.html';
 const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
-const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8'), [OWN]: fs.readFileSync(OWN, 'utf8') };
-const SUITES = ['owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
+const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8'), [OWN]: fs.readFileSync(OWN, 'utf8'), [VCJ]: fs.readFileSync(VCJ, 'utf8') };
+const SUITES = ['qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
 const toCrlf = (t) => t.split(CR + LF).join(LF).split(LF).join(CR + LF);
 
 const M = [
@@ -97,6 +99,15 @@ const M = [
   [OWN, 'OWNER/SAN: e.message de falha inesperada volta à resposta', "    console.error('[setup-webhook] falha inesperada:', (e && e.name) || 'erro');\n    throw providerDown();", "    throw e;"],
   [OWN, 'OWNER/SAN: resposta crua do provedor volta ao cliente', "    if (!createResp.ok) { console.error('[setup-webhook] Asaas create status', createResp.status); throw providerDown(); }", "    if (!createResp.ok) throw Object.assign(new Error(await createResp.text()), { status: 502 });"],
   [OWN, 'OWNER/SAN: sucesso volta a devolver dados do provedor', "    return { ok: true, action: 'created' };", "    return { ok: true, action: 'created', webhookId: created.id, url: BILLING_WEBHOOK_URL, events };"],
+  // ══ P0-QR-PUBLIC-01: caminho 'sem ownerId -> instância global' fechado ══
+  [BRK, 'QR/GUARD: guard removido (volta a instância global)', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });\n", ''],
+  [BRK, 'QR/GUARD: guard só vale sem variáveis do Evolution', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId && !process.env.EVOLUTION_INSTANCE) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
+  [BRK, 'QR/ORDEM: provedor inicializado antes do guard', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId) { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/connectionState/${c.instance}`).catch(() => {}); }\n  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
+  [BRK, 'QR/ORDEM: Firestore lido antes do guard', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  await db.collection('owners').doc(ownerId || 'x').get();\n  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
+  [BRK, 'QR/STATUS: guard devolve 200 em vez de 400', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId) return { ok: false };"],
+  [BRK, 'QR/SAN: resposta revela a instância global', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório (instância ' + process.env.EVOLUTION_INSTANCE + ')'), { status: 400 });"],
+  [BRK, 'QR/TIMER: polling iniciado antes do guard', "  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });", "  setTimeout(() => {}, 1);\n  if (!ownerId) throw Object.assign(new Error('ownerId obrigatório'), { status: 400 });"],
+  [VCJ, 'QR/ROTA: rewrite /qr reintroduzido', '"rewrites": [', '"rewrites": [\n    { "source": "/qr", "destination": "/api/ilocarpay-broker" },'],
 ];
 
 let killed = 0; const survivors = [];
@@ -115,8 +126,24 @@ for (const [file, name, from0, to0] of M) {
   console.log(`  ${failed ? 'MORTO ' : 'VIVO  '} ${name}`);
   if (failed) killed++; else survivors.push(name);
 }
+// Mutante de criação (P0-QR-PUBLIC-01): a página pública /qr volta a existir -> a suíte TEM de falhar.
+{
+  const name = 'QR/ROTA: página pública /qr recriada';
+  const page = execSync('git show 7ec701f:public/qr/index.html', { cwd: W });
+  let failed = false;
+  try {
+    fs.mkdirSync(path.dirname(QRP), { recursive: true });
+    fs.writeFileSync(QRP, page);
+    for (const s of SUITES) {
+      try { execSync('node --loader ./loader.mjs ' + s, { cwd: W + 'tests/backend', stdio: 'pipe', timeout: 180000 }); } catch (_) { failed = true; break; }
+    }
+  } finally { fs.rmSync(path.dirname(QRP), { recursive: true, force: true }); }
+  console.log(`  ${failed ? 'MORTO ' : 'VIVO  '} ${name}`);
+  M.push([QRP, name]);
+  if (failed) killed++; else survivors.push(name);
+}
 for (const f of Object.keys(orig)) fs.writeFileSync(f, orig[f]);
 console.log(`\nmutantes mortos: ${killed}/${M.length} | sobreviventes: ${survivors.length}`);
 survivors.forEach((s) => console.log('  sobreviveu: ' + s));
-console.log('arquivos restaurados:', Object.keys(orig).every((f) => fs.readFileSync(f, 'utf8') === orig[f]));
+console.log('arquivos restaurados:', Object.keys(orig).every((f) => fs.readFileSync(f, 'utf8') === orig[f]) && !fs.existsSync(QRP));
 process.exit(survivors.length ? 1 : 0);
