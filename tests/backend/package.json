@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Testes dos handlers de api/ com fakes em memória (sem rede, sem Firestore real)",
   "scripts": {
-    "test": "node --loader ./loader.mjs retry-assinafy.test.mjs",
+    "test": "node --loader ./loader.mjs retry-assinafy.test.mjs && node --loader ./loader.mjs broker-tools.test.mjs",
     "mutants": "node mutants.cjs"
   }
 }

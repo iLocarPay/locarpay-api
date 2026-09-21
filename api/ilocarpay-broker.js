@@ -64,6 +64,28 @@ const PUBLIC_ERRORS = Object.freeze({
     status: 429,
     message: 'Muitas tentativas de reenvio para este contrato. Tente novamente mais tarde.',
   }),
+  // P0-BROKER-OPEN-STEPS-01: ferramentas administrativas (master-only). Nenhuma mensagem revela
+  // instância, URL, destinatário, credencial ou resposta do provedor.
+  INTEGRATION_NOT_CONFIGURED: Object.freeze({
+    status: 503,
+    message: 'Integração não configurada neste ambiente. Acione o suporte iLocarPay.',
+  }),
+  PROVIDER_UNAVAILABLE: Object.freeze({
+    status: 503,
+    message: 'Serviço externo indisponível no momento. Tente novamente mais tarde.',
+  }),
+  RECIPIENT_NOT_ALLOWED: Object.freeze({
+    status: 400,
+    message: 'Destinatário não permitido para esta ferramenta.',
+  }),
+  TOOL_BUSY: Object.freeze({
+    status: 409,
+    message: 'Esta ferramenta já está em execução. Aguarde alguns instantes.',
+  }),
+  TOOL_RATE_LIMITED: Object.freeze({
+    status: 429,
+    message: 'Limite de uso desta ferramenta atingido. Tente novamente mais tarde.',
+  }),
 });
 
 // Cria um erro explicitamente publicável. `technical` existe só para o log do servidor
@@ -285,9 +307,10 @@ async function sendContractEmail({ landlordName, landlordEmail, tenantName, tena
 
 async function sendWhatsApp(phone, message, ownerData = null, ownerId = null) {
   const { baseUrl, apiKey, instance } = getEvoConfig(ownerData, ownerId);
-  if (!baseUrl || !apiKey || !instance || !phone) return;
+  // P0-BROKER-OPEN-STEPS-01: devolve true só quando o provedor aceita o envio (callers antigos ignoram).
+  if (!baseUrl || !apiKey || !instance || !phone) return false;
   const digits = phone.replace(/\D/g, '');
-  if (digits.length < 10) return;
+  if (digits.length < 10) return false;
   const number = digits.startsWith('55') ? digits : `55${digits}`;
   try {
     const r = await fetch(`${baseUrl}/message/sendText/${instance}`, {
@@ -295,8 +318,10 @@ async function sendWhatsApp(phone, message, ownerData = null, ownerId = null) {
       headers: { 'Content-Type': 'application/json', 'apikey': apiKey },
       body: JSON.stringify({ number, text: message, options: { linkPreview: true } })
     });
-    if (!r.ok) console.warn('[whatsapp] sendText falhou:', await r.text().catch(() => r.status));
-  } catch (e) { console.warn('[whatsapp]', e.message); }
+    // P0-BROKER-OPEN-STEPS-01: só o status — o corpo do provedor pode ecoar número/texto.
+    if (!r.ok) console.warn('[whatsapp] sendText falhou: status', r.status);
+    return r.ok === true;
+  } catch (e) { console.warn('[whatsapp] falha de rede:', (e && e.name) || 'erro'); return false; }
 }
 
 async function sendPush(db, tenantId, title, body) {
@@ -1718,6 +1743,38 @@ export default async function handler(req, res) {
     return res.status(410).json({ error: 'endpoint desativado' });
   }
 
+// ── P0-BROKER-OPEN-STEPS-01: ferramentas administrativas do broker ────────────
+// Antes: test-email, send-whatsapp-test, test-assinafy, whatsapp-debug e setup-webhook rodavam
+// SEM autenticação. Nenhum tem caller (painel, superadmin, scripts ou Android): viram master-only
+// no gate; whatsapp-debug e test-assinafy, sem uso comprovado, ficam desativados (410).
+const BROKER_TOOL_STEPS = new Set(['test-email', 'send-whatsapp-test', 'setup-webhook', 'whatsapp-debug', 'test-assinafy']);
+const BROKER_DISABLED_STEPS = new Set(['whatsapp-debug', 'test-assinafy']);
+// Limite GLOBAL por ferramenta (não por usuário) + uma execução por vez (lock curto).
+const TOOL_LIMITS = Object.freeze({ 'test-email': 3, 'send-whatsapp-test': 3, 'setup-webhook': 5 });
+const TOOL_WINDOW_MS = 60 * 60 * 1000;
+const TOOL_LOCK_MS = 60 * 1000;
+// URL do webhook é fixa no servidor: nada do corpo escolhe destino, segredo ou eventos.
+const EVOLUTION_WEBHOOK_URL = 'https://www.ilocarpay.com.br/api/ilocarpay-broker?step=evolution-webhook';
+const EVOLUTION_WEBHOOK_EVENTS = Object.freeze(['MESSAGES_UPDATE', 'MESSAGES_UPSERT']);
+
+async function acquireToolSlot(db, step) {
+  const ref = db.collection('_toolRateLimits').doc(step);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const d = snap.exists ? (snap.data() || {}) : {};
+    const now = Date.now();
+    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw publicError('TOOL_BUSY', 'tool: execução em andamento');
+    const inWindow = typeof d.windowStart === 'number' && now - d.windowStart < TOOL_WINDOW_MS;
+    const count = inWindow && typeof d.count === 'number' ? d.count : 0;
+    if (count >= TOOL_LIMITS[step]) throw publicError('TOOL_RATE_LIMITED', 'tool: limite da janela');
+    tx.set(ref, { windowStart: inWindow ? d.windowStart : now, count: count + 1, lockUntil: now + TOOL_LOCK_MS });
+  });
+  return ref;
+}
+async function releaseToolSlot(ref) {
+  try { await ref.update({ lockUntil: 0 }); } catch (e) { console.error('[broker-tool] falha ao liberar lock:', e && e.message); }
+}
+
 // ── P0-RETRY-ASSINAFY-01: reenvio idempotente ao Assinafy ─────────────────────
 // Estado no próprio contracts/{id}, campo assinafyRetry (só backend/Admin SDK escreve):
 //   { lockBy: 'master'|'owner'|'cron', lockAt, lockUntil, committed, windowStart, attempts }
@@ -1992,6 +2049,11 @@ async function handleCronRetryAssinafy(db) {
     // SEC-CONTRACT-03B2: steps internos de contrato. Ordem obrigatória:
     // autenticar -> carregar recurso -> ownership -> estado -> só então side effect externo/write.
     // Identidade vem só do Firebase ID token; body.ownerId/tenantId/brokerId/email nunca concedem privilégio.
+    else if (BROKER_TOOL_STEPS.has(step)) {
+      // P0-BROKER-OPEN-STEPS-01: ferramentas administrativas — somente master (authz canônico).
+      // Sem token/revogado -> 401; autenticado sem ser master -> 403. Nada do corpo concede papel.
+      req._toolAuth = await requireMasterBearer(req);
+    }
     else if (step === 'retry-assinafy') {
       // P0-RETRY-ASSINAFY-01: Bearer OBRIGATÓRIO (antes não havia autenticação nenhuma).
       // Papéis: master (authz canônico) ou owner ATIVO da imobiliária do contrato — os mesmos de
@@ -2080,51 +2142,46 @@ async function handleCronRetryAssinafy(db) {
       result = await handleWhatsappQr(db, req.body);
     }
     else if (step === 'setup-webhook') {
+      // P0-BROKER-OPEN-STEPS-01: master-only (gate). ownerId só escolhe a instância; URL, eventos e
+      // credenciais vêm do servidor. Consulta antes de alterar: já configurado -> não reescreve.
       const rawId = req.body.ownerId;
-      const ownerId = (rawId && rawId !== 'undefined') ? rawId.trim() : null;
-      let ownerData = null;
-      if (ownerId) {
-        const snap = await db.collection('owners').doc(ownerId).get();
-        ownerData = snap.exists ? snap.data() : null;
+      let ownerId = null, ownerData = null;
+      if (rawId !== undefined && rawId !== null && rawId !== '') {
+        if (typeof rawId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(rawId)) throw Object.assign(new Error('ownerId inválido'), { status: 400 });
+        const snap = await db.collection('owners').doc(rawId).get();
+        if (!snap.exists) throw Object.assign(new Error('Imobiliária não encontrada'), { status: 404 });
+        ownerId = rawId; ownerData = snap.data();
       }
       const { baseUrl, apiKey, instance } = getEvoConfig(ownerData, ownerId);
-      const evoFetch = makeEvoFetch(baseUrl, apiKey);
-      const webhookUrl = 'https://www.ilocarpay.com.br/api/ilocarpay-broker?step=evolution-webhook';
-      const body = JSON.stringify({ webhook: { enabled: true, url: webhookUrl, webhook_by_events: true, events: ['MESSAGES_UPDATE', 'MESSAGES_UPSERT'] } });
-      const r = await evoFetch(`webhook/set/${instance}`, { method: 'POST', body });
-      const text = await r.text();
-      result = { ok: true, instance, status: r.status, body: text.slice(0, 300) };
+      if (!baseUrl || !apiKey || !instance) throw publicError('INTEGRATION_NOT_CONFIGURED', 'setup-webhook: evolution sem configuração');
+      const slot = await acquireToolSlot(db, step);
+      try {
+        const evoFetch = makeEvoFetch(baseUrl, apiKey);
+        let cur = null;
+        try {
+          const f = await evoFetch(`webhook/find/${instance}`);
+          if (f.ok) { const j = await f.json().catch(() => null); cur = (j && j.webhook) || j; }
+        } catch (_) { /* sem leitura: segue para a configuração */ }
+        const already = !!cur && cur.enabled === true && cur.url === EVOLUTION_WEBHOOK_URL
+          && Array.isArray(cur.events) && EVOLUTION_WEBHOOK_EVENTS.every((ev) => cur.events.includes(ev));
+        if (already) result = { ok: true, changed: false };
+        else {
+          const body = JSON.stringify({ webhook: { enabled: true, url: EVOLUTION_WEBHOOK_URL, webhook_by_events: true, events: [...EVOLUTION_WEBHOOK_EVENTS] } });
+          const r = await evoFetch(`webhook/set/${instance}`, { method: 'POST', body });
+          if (!r.ok) throw publicError('PROVIDER_UNAVAILABLE', 'setup-webhook: provedor status ' + r.status);
+          result = { ok: true, changed: true };
+        }
+      } catch (e) {
+        if (e && e.status) throw e;
+        console.error('[setup-webhook] falha do provedor:', (e && e.name) || 'erro');
+        throw publicError('PROVIDER_UNAVAILABLE', 'setup-webhook: falha de rede');
+      } finally { await releaseToolSlot(slot); }
     }
-    else if (step === 'whatsapp-debug') {
-      // Diagnóstico completo: cria instância e tenta pegar QR
-      const rawId = req.body.ownerId;
-      const ownerId = (rawId && rawId !== 'undefined') ? rawId.trim() : null;
-      let ownerData = null;
-      if (ownerId) {
-        const snap = await db.collection('owners').doc(ownerId).get();
-        ownerData = snap.exists ? snap.data() : null;
-      }
-      const { baseUrl, apiKey, instance } = getEvoConfig(ownerData, ownerId);
-      const evoFetch = makeEvoFetch(baseUrl, apiKey);
-      // 1. Estado atual
-      const stateRes = await evoFetch(`instance/connectionState/${instance}`);
-      const stateText = await stateRes.text();
-      // 2. Criar instância
-      const createRes = await evoFetch(`instance/create`, {
-        method: 'POST',
-        body: JSON.stringify({ instanceName: instance, qrcode: true, integration: 'WHATSAPP-BAILEYS' }),
-      });
-      const createText = await createRes.text();
-      // 3. Aguardar e pegar QR
-      await new Promise(r => setTimeout(r, 3000));
-      const connectRes = await evoFetch(`instance/connect/${instance}`);
-      const connectText = await connectRes.text();
-      result = {
-        ok: true, instance, baseUrl: baseUrl.slice(0,30)+'...',
-        stateStatus: stateRes.status, stateBody: stateText.slice(0,300),
-        createStatus: createRes.status, createBody: createText.slice(0,300),
-        connectStatus: connectRes.status, connectBody: connectText.slice(0,300),
-      };
+    else if (BROKER_DISABLED_STEPS.has(step)) {
+      // P0-BROKER-OPEN-STEPS-01: whatsapp-debug (criava instância e devolvia respostas cruas do
+      // Evolution) e test-assinafy (criava assignment e disparava e-mail de assinatura para
+      // endereços do corpo) não têm caller nem uso comprovado: desativados, fail-closed.
+      throw Object.assign(new Error('endpoint desativado'), { status: 410 });
     }
     else if (step === 'whatsapp-disconnect') {
       result = await handleWhatsappDisconnect(db, req.body);
@@ -2133,39 +2190,40 @@ async function handleCronRetryAssinafy(db) {
       result = await handleWaKeepalive(db);
     }
     else if (step === 'send-whatsapp-test') {
-      const { phone, message } = req.body;
-      if (!phone) throw Object.assign(new Error('phone obrigatório'), { status: 400 });
-      await sendWhatsApp(phone, message || 'Teste iLocarPay\n\nhttps://www.ilocarpay.com.br');
+      // P0-BROKER-OPEN-STEPS-01: master-only; destino e texto FIXOS (número administrativo do
+      // servidor). Telefone diferente no corpo é recusado; texto do corpo é ignorado.
+      const adminPhone = String(process.env.ADMIN_WHATSAPP || '').replace(/\D/g, '');
+      const { phone } = req.body;
+      if (phone !== undefined && phone !== null && phone !== '') {
+        if (typeof phone !== 'string' || phone.length > 32) throw Object.assign(new Error('Telefone inválido'), { status: 400 });
+        const norm = (x) => (x.startsWith('55') ? x : '55' + x);
+        const asked = phone.replace(/\D/g, '');
+        if (asked.length < 10 || adminPhone.length < 10 || norm(asked) !== norm(adminPhone)) throw publicError('RECIPIENT_NOT_ALLOWED', 'send-whatsapp-test: destino fora do número administrativo');
+      }
+      if (adminPhone.length < 10) throw publicError('INTEGRATION_NOT_CONFIGURED', 'send-whatsapp-test: ADMIN_WHATSAPP ausente');
+      const slot = await acquireToolSlot(db, step);
+      let sent = false;
+      try { sent = await sendWhatsApp(adminPhone, 'Teste iLocarPay\n\nhttps://www.ilocarpay.com.br'); }
+      finally { await releaseToolSlot(slot); }
+      if (sent !== true) throw publicError('PROVIDER_UNAVAILABLE', 'send-whatsapp-test: envio não confirmado');
       result = { ok: true };
     }
     else if (step === 'test-email') {
+      // P0-BROKER-OPEN-STEPS-01: master-only; envia SOMENTE para o e-mail do próprio master
+      // autenticado (do token). Outro destinatário no corpo é recusado.
+      const self = req._toolAuth.email;
       const { to } = req.body;
-      if (!to) throw Object.assign(new Error('to obrigatório'), { status: 400 });
-      await sendEmail(to, '✅ Teste SMTP — iLocarPay', '<p>E-mail de teste enviado com sucesso!</p>');
-      result = { ok: true, to, smtp: 'noreply@dlftech.com.br' };
-    }
-    else if (step === 'test-assinafy') {
-      const { documentId, ownerEmail, tenantEmail } = req.body;
-      const configSnap = await db.collection('config').doc('assinafy').get();
-      const apiKey = configSnap.data()?.apiKey;
-      const accountId = await getAssinafyAccount(apiKey);
-      // Cria signatários de teste (get-or-create)
-      let s1Id, s2Id, assignRes;
-      try { s1Id = await getOrCreateSigner(apiKey, accountId, 'Proprietário Teste', ownerEmail  || 'denisfelicio20@gmail.com'); } catch(e) { s1Id = null; }
-      try { s2Id = await getOrCreateSigner(apiKey, accountId, 'Inquilino Teste',    tenantEmail || 'denisfelicio2@gmail.com');  } catch(e) { s2Id = null; }
-      if (s1Id && s2Id) {
-        try {
-          assignRes = await assinafyReq('POST', `documents/${documentId}/assignments`, {
-            method: 'virtual',
-            message: 'Por favor, assine o contrato de locação.',
-            signers: [
-              { id: s1Id, step: 1, action: 'sign', verification_method: 'Email', notification_methods: ['Email'] },
-              { id: s2Id, step: 2, action: 'sign', verification_method: 'Email', notification_methods: ['Email'] }
-            ]
-          }, apiKey);
-        } catch(e) { assignRes = { error: e.message }; }
+      if (to !== undefined && to !== null && to !== '') {
+        if (typeof to !== 'string' || to.length > 254) throw Object.assign(new Error('Destinatário inválido'), { status: 400 });
+        if (to.trim().toLowerCase() !== self) throw publicError('RECIPIENT_NOT_ALLOWED', 'test-email: destinatário diferente do master autenticado');
       }
-      result = { accountId, s1Id, s2Id, assign: assignRes?.data || assignRes };
+      const slot = await acquireToolSlot(db, step);
+      try { await sendEmail(self, '✅ Teste SMTP — iLocarPay', '<p>E-mail de teste enviado com sucesso!</p>'); }
+      catch (e) {
+        console.error('[test-email] falha SMTP:', (e && e.code) || 'erro');
+        throw publicError('PROVIDER_UNAVAILABLE', 'test-email: smtp falhou');
+      } finally { await releaseToolSlot(slot); }
+      result = { ok: true };
     }
     else if (step === 'save-assinafy-key') {
       const { apiKey, callerEmail } = req.body;
