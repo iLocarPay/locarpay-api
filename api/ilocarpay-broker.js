@@ -15,6 +15,7 @@ import { getAuth }                       from 'firebase-admin/auth';
 import { getMessaging }                  from 'firebase-admin/messaging';
 import { getStorage }                    from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
+import { timingSafeEqual }                from 'node:crypto';
 import { PDFDocument as PdfLib, rgb, StandardFonts } from 'pdf-lib';
 import { requireOwnerBearer, requireMasterBearer, verifyBearer, isMasterEmail, assertActiveUser, assertOwner, assertOwnerOrBroker } from '../lib/authz.js';
 
@@ -1825,6 +1826,71 @@ const TOOL_LOCK_MS = 60 * 1000;
 const EVOLUTION_WEBHOOK_URL = 'https://www.ilocarpay.com.br/api/ilocarpay-broker?step=evolution-webhook';
 const EVOLUTION_WEBHOOK_EVENTS = Object.freeze(['MESSAGES_UPDATE', 'MESSAGES_UPSERT']);
 
+// ── GATE-WA-ENTRYPOINTS-01: autenticação do webhook do Evolution ──────────────
+// O Evolution chama exatamente a URL configurada pelo setup-webhook (master-only). O token
+// server-side EVOLUTION_WEBHOOK_TOKEN vai nessa URL (parâmetro wt) e é conferido em tempo constante.
+// Sem token configurado (ou fraco), o webhook recusa tudo e o setup-webhook não registra URL.
+const WA_WEBHOOK_TOKEN_MIN = 32;
+const WA_WEBHOOK_MAX_BYTES = 256 * 1024;
+const WA_WEBHOOK_MAX_ITEMS = 50;
+const WA_WEBHOOK_MAX_UPDATES = 400; // abaixo do limite de 500 escritas por batch
+
+function evolutionWebhookToken() {
+  const tk = process.env.EVOLUTION_WEBHOOK_TOKEN;
+  return (typeof tk === 'string' && tk.length >= WA_WEBHOOK_TOKEN_MIN && tk.trim() === tk && /^[\x21-\x7e]+$/.test(tk)) ? tk : null;
+}
+function evolutionWebhookUrl() {
+  const tk = evolutionWebhookToken();
+  return tk ? EVOLUTION_WEBHOOK_URL + '&wt=' + encodeURIComponent(tk) : null;
+}
+function evolutionWebhookAuthorized(req) {
+  const expected = evolutionWebhookToken();
+  if (!expected) return false;
+  const got = req.query ? req.query.wt : undefined;
+  if (typeof got !== 'string') return false;
+  const a = Buffer.from(got), b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+// Só o evento de leitura interessa; qualquer outro formato é ignorado sem efeito.
+function parseEvolutionReadEvent(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  let size;
+  try { size = JSON.stringify(body).length; } catch (_) { return null; }
+  if (size > WA_WEBHOOK_MAX_BYTES) return null;
+  const event = body.event || body.type;
+  if (event !== 'messages.update' && event !== 'message.update') return null;
+  const instance = body.instance;
+  if (typeof instance !== 'string' || !/^[A-Za-z0-9_.-]{1,64}$/.test(instance)) return null;
+  const raw = Array.isArray(body.data) ? body.data : (body.data && typeof body.data === 'object' ? [body.data] : []);
+  if (raw.length > WA_WEBHOOK_MAX_ITEMS) return null;
+  const phones = [];
+  for (const upd of raw) {
+    if (!upd || typeof upd !== 'object') continue;
+    const status = upd.status !== undefined ? upd.status : (upd.update && upd.update.status);
+    const fromMe = upd.key && upd.key.fromMe !== undefined ? upd.key.fromMe : upd.fromMe;
+    const jid = (upd.key && upd.key.remoteJid) || upd.remoteJid || '';
+    if (fromMe !== true) continue;
+    if (status !== 'READ' && status !== 'read' && status !== 4) continue;
+    if (typeof jid !== 'string' || jid.length > 64) continue;
+    const phone = jid.replace(/@.*/, '').replace(/\D/g, '');
+    if (phone.length < 10 || phone.length > 15) continue;
+    if (!phones.includes(phone)) phones.push(phone);
+  }
+  return { instance, phones };
+}
+// Instância -> imobiliária SOMENTE pelo registro server-side (owners.evolutionInstance).
+// Desconhecida, compartilhada, suspensa ou igual à da plataforma -> null (evento ignorado).
+async function resolveWebhookInstanceOwner(db, instance) {
+  const globalInst = String(process.env.EVOLUTION_INSTANCE || '').trim();
+  if (globalInst && instance === globalInst) return null;
+  const q = await db.collection('owners').where('evolutionInstance', '==', instance).limit(2).get();
+  if (q.size !== 1) return null;
+  const d = q.docs[0].data() || {};
+  if (d.status === 'suspended') return null;
+  return q.docs[0].id;
+}
+
 async function acquireToolSlot(db, step) {
   const ref = db.collection('_toolRateLimits').doc(step);
   await db.runTransaction(async (tx) => {
@@ -2026,42 +2092,43 @@ async function handleCronRetryAssinafy(db) {
 
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  // Webhook do Evolution API (POST /api/ilocarpay-broker?step=evolution-webhook)
+  // Webhook do Evolution API (POST /api/ilocarpay-broker?step=evolution-webhook&wt=<token>)
+  // GATE-WA-ENTRYPOINTS-01: antes era anônimo, ignorava a instância e marcava como lidas mensagens de
+  // TODAS as imobiliárias (sufixo de 8 dígitos do telefone), registrando o telefone completo no log.
+  // Agora: token obrigatório (tempo constante); payload validado; instância -> imobiliária só pelo
+  // registro server-side; só mensagens dessa imobiliária; efeito idempotente (false -> true).
   if (req.query?.step === 'evolution-webhook') {
+    if (!evolutionWebhookAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });
     try {
-      initFirebase();
-      const db = getFirestore();
-      const event = req.body?.event || req.body?.type;
-      if (event === 'messages.update' || event === 'message.update') {
-        const updates = Array.isArray(req.body?.data) ? req.body.data : [req.body?.data].filter(Boolean);
-        const batch = db.batch();
-        let updated = 0;
-        for (const upd of updates) {
-          const status = upd?.status || upd?.update?.status;
-          const remoteJid = upd?.key?.remoteJid || upd?.remoteJid || '';
-          const fromMe = upd?.key?.fromMe ?? upd?.fromMe ?? false;
-          if (!fromMe) continue;
-          if (status !== 'READ' && status !== 'read' && status !== 4) continue;
-          const phone = remoteJid.replace(/@.*/, '').replace(/\D/g, '');
-          if (!phone) continue;
-          console.log(`[evo-webhook] READ phone=${phone}`);
-          const chamadosSnap = await db.collectionGroup('messages')
+      const parsed = parseEvolutionReadEvent(req.body);
+      if (parsed && parsed.phones.length) {
+        initFirebase();
+        const db = getFirestore();
+        const ownerId = await resolveWebhookInstanceOwner(db, parsed.instance);
+        if (ownerId) {
+          const snap = await db.collectionGroup('messages')
             .where('readByTenant', '==', false)
             .where('fromMe', '==', true)
             .get();
-          for (const msgDoc of chamadosSnap.docs) {
-            const msgPhone = (msgDoc.data().tenantPhone || '').replace(/\D/g, '');
-            if (msgPhone && msgPhone.endsWith(phone.slice(-8))) {
+          const batch = db.batch();
+          let updated = 0;
+          for (const msgDoc of snap.docs) {
+            if (updated >= WA_WEBHOOK_MAX_UPDATES) break;
+            const m = msgDoc.data() || {};
+            if ((m.ownerId || m.chamadoOwnerId) !== ownerId) continue; // nunca outra imobiliária
+            const msgPhone = String(m.tenantPhone || '').replace(/\D/g, '');
+            if (msgPhone.length < 10) continue;
+            if (parsed.phones.some((p) => msgPhone.endsWith(p.slice(-8)))) {
               batch.update(msgDoc.ref, { readByTenant: true, readAt: new Date().toISOString() });
               updated++;
             }
           }
+          if (updated > 0) await batch.commit();
+          console.log('[evo-webhook] mensagens marcadas como lidas:', updated);
         }
-        if (updated > 0) await batch.commit();
-        console.log(`[evo-webhook] ${updated} msgs lidas`);
       }
     } catch (e) {
-      console.error('[evo-webhook]', e.message);
+      console.error('[evo-webhook] falha:', (e && e.name) || 'erro');
     }
     return res.status(200).json({ ok: true });
   }
@@ -2117,6 +2184,11 @@ async function handleCronRetryAssinafy(db) {
     // SEC-CONTRACT-03B2: steps internos de contrato. Ordem obrigatória:
     // autenticar -> carregar recurso -> ownership -> estado -> só então side effect externo/write.
     // Identidade vem só do Firebase ID token; body.ownerId/tenantId/brokerId/email nunca concedem privilégio.
+    else if (step === 'wa-keepalive') {
+      // GATE-WA-ENTRYPOINTS-01: o cron da Vercel chama o keepalive por GET (com CRON_SECRET). O POST não
+      // tem caller e rodava anônimo (consultava/reconectava instâncias e gravava status): desativado.
+      throw Object.assign(new Error('endpoint desativado'), { status: 410 });
+    }
     else if (step === 'whatsapp-disconnect') {
       // P0-OWNER-WHATSAPP-DISCONNECT-01: admin ativo da própria imobiliária (derivada do token);
       // ownerId do corpo só como asserção (divergente -> 404). Nada é lido do alvo antes disso.
@@ -2234,6 +2306,9 @@ async function handleCronRetryAssinafy(db) {
       }
       const { baseUrl, apiKey, instance } = getEvoConfig(ownerData, ownerId);
       if (!baseUrl || !apiKey || !instance) throw publicError('INTEGRATION_NOT_CONFIGURED', 'setup-webhook: evolution sem configuração');
+      // GATE-WA-ENTRYPOINTS-01: a URL registrada carrega o token do webhook; sem token, nada é registrado.
+      const webhookUrl = evolutionWebhookUrl();
+      if (!webhookUrl) throw publicError('INTEGRATION_NOT_CONFIGURED', 'setup-webhook: EVOLUTION_WEBHOOK_TOKEN ausente ou fraco');
       const slot = await acquireToolSlot(db, step);
       try {
         const evoFetch = makeEvoFetch(baseUrl, apiKey);
@@ -2242,11 +2317,11 @@ async function handleCronRetryAssinafy(db) {
           const f = await evoFetch(`webhook/find/${instance}`);
           if (f.ok) { const j = await f.json().catch(() => null); cur = (j && j.webhook) || j; }
         } catch (_) { /* sem leitura: segue para a configuração */ }
-        const already = !!cur && cur.enabled === true && cur.url === EVOLUTION_WEBHOOK_URL
+        const already = !!cur && cur.enabled === true && cur.url === webhookUrl
           && Array.isArray(cur.events) && EVOLUTION_WEBHOOK_EVENTS.every((ev) => cur.events.includes(ev));
         if (already) result = { ok: true, changed: false };
         else {
-          const body = JSON.stringify({ webhook: { enabled: true, url: EVOLUTION_WEBHOOK_URL, webhook_by_events: true, events: [...EVOLUTION_WEBHOOK_EVENTS] } });
+          const body = JSON.stringify({ webhook: { enabled: true, url: webhookUrl, webhook_by_events: true, events: [...EVOLUTION_WEBHOOK_EVENTS] } });
           const r = await evoFetch(`webhook/set/${instance}`, { method: 'POST', body });
           if (!r.ok) throw publicError('PROVIDER_UNAVAILABLE', 'setup-webhook: provedor status ' + r.status);
           result = { ok: true, changed: true };
@@ -2265,9 +2340,6 @@ async function handleCronRetryAssinafy(db) {
     }
     else if (step === 'whatsapp-disconnect') {
       result = await handleWhatsappDisconnect(db, req._waOrg);
-    }
-    else if (step === 'wa-keepalive') {
-      result = await handleWaKeepalive(db);
     }
     else if (step === 'send-whatsapp-test') {
       // P0-BROKER-OPEN-STEPS-01: master-only; destino e texto FIXOS (número administrativo do

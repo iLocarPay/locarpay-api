@@ -182,8 +182,14 @@ globalThis.fetch = async (url, opts) => /instance\/connect\//.test(String(url)) 
 r = await call({ step: 'whatsapp-qr' }, H.adminA);
 globalThis.fetch = origFetch;
 ok('QR autenticado continua íntegro', r.statusCode === 200 && r.body.qr === 'data:image/png;base64,QUJD' && r.headers['cache-control'] === 'no-store, private, max-age=0', J(r));
-base(); r = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });
-ok('webhook do Evolution continua íntegro', r.statusCode === 200 && r.body.ok === true);
+base();
+{
+const rTok = process.env.EVOLUTION_WEBHOOK_TOKEN; process.env.EVOLUTION_WEBHOOK_TOKEN = 'tok-webhook-de-teste-0123456789abcdef';
+const wAnon = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });
+const wAuth = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook', wt: 'tok-webhook-de-teste-0123456789abcdef' });
+if (rTok === undefined) delete process.env.EVOLUTION_WEBHOOK_TOKEN; else process.env.EVOLUTION_WEBHOOK_TOKEN = rTok;
+ok('webhook do Evolution: sem token 401; com token 200 (GATE-WA-ENTRYPOINTS-01)', wAnon.statusCode === 401 && wAuth.statusCode === 200 && wAuth.body.ok === true, JSON.stringify([wAnon.body, wAuth.body]));
+}
 ok('envio operacional intacto (sendWhatsApp)', /async function sendWhatsApp\(phone, message, ownerData = null, ownerId = null\)/.test(src));
 ok('/qr pública continua inexistente', !existsSync(new URL('public/qr', ROOT)));
 ok('rede: nenhuma chamada fora do Evolution simulado', net.everUnexpected === 0);

@@ -1,4 +1,4 @@
-// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01, WHATSAPP-MT-02, P0-OWNER-WHATSAPP-DISCONNECT-01).
+// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01, WHATSAPP-MT-02, P0-OWNER-WHATSAPP-DISCONNECT-01, GATE-WA-ENTRYPOINTS-01).
 // Um defeito por vez; as suítes TÊM de falhar.
 // Uso: cd tests/backend && node mutants.cjs  (restaura os arquivos ao final, mesmo com falha).
 const { execSync } = require('child_process');
@@ -13,7 +13,7 @@ const VCJ = W + 'vercel.json';
 const QRP = W + 'public/qr/index.html';
 const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
 const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8'), [OWN]: fs.readFileSync(OWN, 'utf8'), [VCJ]: fs.readFileSync(VCJ, 'utf8') };
-const SUITES = ['whatsapp-disconnect.test.mjs', 'whatsapp-qr.test.mjs', 'qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
+const SUITES = ['wa-entrypoints.test.mjs', 'whatsapp-disconnect.test.mjs', 'whatsapp-qr.test.mjs', 'qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
 const toCrlf = (t) => t.split(CR + LF).join(LF).split(LF).join(CR + LF);
 
 const M = [
@@ -70,13 +70,13 @@ const M = [
   [BRK, 'TOOLS/DEST: send-whatsapp-test aceita número arbitrário', "        if (asked.length < 10 || adminPhone.length < 10 || norm(asked) !== norm(adminPhone)) throw publicError('RECIPIENT_NOT_ALLOWED'", "        if (false) throw publicError('RECIPIENT_NOT_ALLOWED'"],
   [BRK, 'TOOLS/DEST: send-whatsapp-test usa o texto do corpo', "      try { sent = await sendWhatsApp(adminPhone, 'Teste iLocarPay\\n\\nhttps://www.ilocarpay.com.br'); }", "      try { sent = await sendWhatsApp(adminPhone, req.body.message || 'Teste iLocarPay\\n\\nhttps://www.ilocarpay.com.br'); }"],
   // webhook
-  [BRK, 'TOOLS/WEBHOOK: URL vinda do body', "        const body = JSON.stringify({ webhook: { enabled: true, url: EVOLUTION_WEBHOOK_URL,", "        const body = JSON.stringify({ webhook: { enabled: true, url: req.body.webhookUrl || EVOLUTION_WEBHOOK_URL,"],
+  [BRK, "TOOLS/WEBHOOK: URL vinda do body", "        const body = JSON.stringify({ webhook: { enabled: true, url: webhookUrl,", "        const body = JSON.stringify({ webhook: { enabled: true, url: req.body.webhookUrl || webhookUrl,"],
   [BRK, 'TOOLS/WEBHOOK: segredo/campos do body mesclados', "webhook_by_events: true, events: [...EVOLUTION_WEBHOOK_EVENTS] } });", "webhook_by_events: true, events: [...EVOLUTION_WEBHOOK_EVENTS], ...(req.body.webhook || {}), secret: req.body.secret } });"],
   [BRK, 'TOOLS/WEBHOOK: reescreve mesmo já configurado', "        if (already) result = { ok: true, changed: false };", "        if (false) result = { ok: true, changed: false };"],
   // sanitização
   [BRK, 'TOOLS/SAN: setup-webhook devolve resposta bruta', "          result = { ok: true, changed: true };", "          result = { ok: true, changed: true, provider: await r.text() };"],
   [BRK, 'TOOLS/SAN: falha do provedor devolve corpo cru', "          if (!r.ok) throw publicError('PROVIDER_UNAVAILABLE', 'setup-webhook: provedor status ' + r.status);", "          if (!r.ok) throw Object.assign(new Error(await r.text()), { status: 502 });"],
-  [BRK, 'TOOLS/SAN: whatsapp-debug volta a expor configuração', "      throw Object.assign(new Error('endpoint desativado'), { status: 410 });", "      { const c = getEvoConfig(null, null); result = { ok: true, instance: c.instance, baseUrl: c.baseUrl }; }"],
+  [BRK, "TOOLS/SAN: whatsapp-debug volta a expor configuração", "      // endereços do corpo) não têm caller nem uso comprovado: desativados, fail-closed.\n      throw Object.assign(new Error('endpoint desativado'), { status: 410 });", "      // endereços do corpo) não têm caller nem uso comprovado: desativados, fail-closed.\n      { const c = getEvoConfig(null, null); result = { ok: true, instance: c.instance, baseUrl: c.baseUrl }; }"],
   [BRK, 'TOOLS/SAN: log do WhatsApp volta a gravar o corpo do provedor', "    if (!r.ok) console.warn('[whatsapp] sendText falhou: status', r.status);", "    if (!r.ok) console.warn('[whatsapp] sendText falhou:', await r.text().catch(() => r.status));"],
   [BRK, 'TOOLS/FALHA: envio de WhatsApp sempre reportado como sucesso', "    return r.ok === true;", "    return true;"],
   [BRK, 'TOOLS/FALHA: erro de SMTP vira resposta com e.message', "        throw publicError('PROVIDER_UNAVAILABLE', 'test-email: smtp falhou');", "        throw Object.assign(new Error(e.message), { status: 502 });"],
@@ -145,6 +145,25 @@ const M = [
   [BRK, "DISC/SAN: resposta do provedor devolvida", "    return { ok: true, disconnected: true, changed: true };", "    return { ok: true, disconnected: true, changed: true, provider: await lo.json().catch(() => null) };"],
   [ADM, "DISC/CALLER: painel deixa de enviar o Bearer", "        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _dcTkn },", "        method: 'POST', headers: { 'Content-Type': 'application/json' },"],
   [ADM, "DISC/CALLER: painel marca desconectado sem conferir res.ok", "      if (!res.ok) throw new Error(res.status === 401 ? 'Sessão expirada. Entre novamente.' : (data.error || 'Erro ' + res.status));\n", ""],
+  // ══ GATE-WA-ENTRYPOINTS-01 ══
+  [BRK, "EP/KEEPALIVE: POST volta a executar o keepalive", "      // tem caller e rodava anônimo (consultava/reconectava instâncias e gravava status): desativado.\n      throw Object.assign(new Error('endpoint desativado'), { status: 410 });", "      // tem caller e rodava anônimo (consultava/reconectava instâncias e gravava status): desativado.\n      { const r0 = await handleWaKeepalive(db); return res.status(200).json(r0); }"],
+  [BRK, "EP/CRON: GET aceita CRON_SECRET ausente (undefined === undefined)", "    if (getStep === 'wa-keepalive') {\n      const cronSecret = process.env.CRON_SECRET;\n      if (!cronSecret || req.headers['authorization'] !== `Bearer ${cronSecret}`) {", "    if (getStep === 'wa-keepalive') {\n      const cronSecret = process.env.CRON_SECRET;\n      if (req.headers['authorization'] !== `Bearer ${cronSecret}`) {"],
+  [BRK, "EP/WEBHOOK: autenticação removida", "    if (!evolutionWebhookAuthorized(req)) return res.status(401).json({ error: 'Unauthorized' });\n", ""],
+  [BRK, "EP/WEBHOOK: token fraco aceito no servidor", "tk.length >= WA_WEBHOOK_TOKEN_MIN && ", ""],
+  [BRK, "EP/WEBHOOK: sem token configurado aceita requisição sem token", "  const expected = evolutionWebhookToken();\n  if (!expected) return false;\n  const got = req.query ? req.query.wt : undefined;", "  const expected = evolutionWebhookToken();\n  const got = req.query ? req.query.wt : undefined;\n  if (!expected) return got === undefined;"],
+  [BRK, "EP/WEBHOOK: comparação só por prefixo", "  if (a.length !== b.length) return false;\n  return timingSafeEqual(a, b);", "  return got.slice(0, 8) === expected.slice(0, 8);"],
+  [BRK, "EP/ESCOPO: mensagens de outra imobiliária alteradas", "            if ((m.ownerId || m.chamadoOwnerId) !== ownerId) continue; // nunca outra imobiliária\n", ""],
+  [BRK, "EP/ESCOPO: ownerId do payload escolhe a imobiliária", "        const ownerId = await resolveWebhookInstanceOwner(db, parsed.instance);", "        const ownerId = (req.body && req.body.ownerId) || await resolveWebhookInstanceOwner(db, parsed.instance);"],
+  [BRK, "EP/INST: instância da plataforma aceita", "  if (globalInst && instance === globalInst) return null;", "  if (false) return null;"],
+  [BRK, "EP/INST: instância compartilhada aceita", "  if (q.size !== 1) return null;", "  if (q.size < 1) return null;"],
+  [BRK, "EP/INST: imobiliária suspensa aceita", "  if (d.status === 'suspended') return null;\n", ""],
+  [BRK, "EP/PAYLOAD: fromMe não exigido", "    if (fromMe !== true) continue;\n", ""],
+  [BRK, "EP/PAYLOAD: limite de tamanho removido", "  if (size > WA_WEBHOOK_MAX_BYTES) return null;\n", ""],
+  [BRK, "EP/PAYLOAD: limite de itens removido", "  if (raw.length > WA_WEBHOOK_MAX_ITEMS) return null;\n", ""],
+  [BRK, "EP/PAYLOAD: telefone curto aceito", "    if (phone.length < 10 || phone.length > 15) continue;", "    if (!phone) continue;"],
+  [BRK, "EP/LOG: telefone registrado no log", "          console.log('[evo-webhook] mensagens marcadas como lidas:', updated);", "          console.log('[evo-webhook] mensagens marcadas como lidas:', updated, parsed.phones.join(','));"],
+  [BRK, "EP/SAN: falha interna devolve e.message", "      console.error('[evo-webhook] falha:', (e && e.name) || 'erro');", "      return res.status(500).json({ error: e.message });"],
+  [BRK, "EP/SETUP: registra URL sem token quando falta configuração", "      const webhookUrl = evolutionWebhookUrl();\n      if (!webhookUrl) throw", "      const webhookUrl = evolutionWebhookUrl() || EVOLUTION_WEBHOOK_URL;\n      if (!webhookUrl) throw"],
   // ══ P0-QR-PUBLIC-01: rota pública ══
   [VCJ, 'QR/ROTA: rewrite /qr reintroduzido', '"rewrites": [', '"rewrites": [\n    { "source": "/qr", "destination": "/api/ilocarpay-broker" },'],
 ];

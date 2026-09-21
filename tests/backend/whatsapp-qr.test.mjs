@@ -213,8 +213,14 @@ ok('38. /qr pública continua inexistente (404 por construção)', !existsSync(n
 const src = read('api/ilocarpay-broker.js');
 ok('39. envio operacional intacto (sendWhatsApp com fallback global para ENVIO)', /async function sendWhatsApp\(phone, message, ownerData = null, ownerId = null\)/.test(src));
 ok('39b. nenhum código de criação/exclusão de instância restou no broker', !/instance\/create|instance\/delete|ensureEvoInstance/.test(src));
-base(); r = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });
-ok('40. webhook do Evolution inalterado (200)', r.statusCode === 200 && r.body.ok === true, J(r));
+base();
+{
+const rTok = process.env.EVOLUTION_WEBHOOK_TOKEN; process.env.EVOLUTION_WEBHOOK_TOKEN = 'tok-webhook-de-teste-0123456789abcdef';
+const wAnon = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });
+const wAuth = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook', wt: 'tok-webhook-de-teste-0123456789abcdef' });
+if (rTok === undefined) delete process.env.EVOLUTION_WEBHOOK_TOKEN; else process.env.EVOLUTION_WEBHOOK_TOKEN = rTok;
+ok('40. webhook do Evolution: sem token 401; com token 200 (GATE-WA-ENTRYPOINTS-01)', wAnon.statusCode === 401 && wAuth.statusCode === 200 && wAuth.body.ok === true, JSON.stringify([wAnon.body, wAuth.body]));
+}
 base(); r = await call({ step: 'setup-webhook', ownerId: 'ownerA' }, H.adminA);
 ok('41. setup-webhook continua master-only (admin -> 403)', r.statusCode === 403 && noProvider(), J(r));
 const gate = src.slice(src.indexOf("    else if (step === 'whatsapp-qr') {"), src.indexOf('    let result;'));

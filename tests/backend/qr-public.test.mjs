@@ -88,8 +88,13 @@ const rp = await call({ step: 'whatsapp-qr', ownerId: 'ownerA' }, { authorizatio
 ok('16. fluxo do painel (admin autenticado, WHATSAPP-MT-02): instância própria já aberta -> connected', rp.statusCode === 200 && rp.body.connected === true, J(rp));
 ok('16b. fluxo do painel consulta só a instância da própria imobiliária', net.calls.length === 1 && /connectionState\/owner_ownerA$/.test(net.calls[0].u), JSON.stringify(net.calls));
 base();
-const rw = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });
-ok('17. webhook do Evolution inalterado (200 ok)', rw.statusCode === 200 && rw.body.ok === true, J(rw));
+{
+const rTok = process.env.EVOLUTION_WEBHOOK_TOKEN; process.env.EVOLUTION_WEBHOOK_TOKEN = 'tok-webhook-de-teste-0123456789abcdef';
+const wAnon = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook' });
+const wAuth = await call({ event: 'messages.update', data: [] }, {}, 'POST', { step: 'evolution-webhook', wt: 'tok-webhook-de-teste-0123456789abcdef' });
+if (rTok === undefined) delete process.env.EVOLUTION_WEBHOOK_TOKEN; else process.env.EVOLUTION_WEBHOOK_TOKEN = rTok;
+ok('17. webhook do Evolution: sem token 401; com token 200 (GATE-WA-ENTRYPOINTS-01)', wAnon.statusCode === 401 && wAuth.statusCode === 200 && wAuth.body.ok === true, JSON.stringify([wAnon.body, wAuth.body]));
+}
 const src = read('api/ilocarpay-broker.js');
 ok('16c. envio operacional intacto: sendWhatsApp e getEvoConfig continuam com o fallback global para ENVIO', /async function sendWhatsApp\(phone, message, ownerData = null, ownerId = null\)/.test(src) && /process\.env\.EVOLUTION_INSTANCE/.test(src));
 

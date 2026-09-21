@@ -5,10 +5,11 @@ import { reset, seed, store, spies } from './fakes.mjs';
 
 // Configuração FICTÍCIA do servidor (nunca valores reais).
 const EVO = 'https://evo.example.test';
-const ENV = { EVOLUTION_API_URL: EVO, EVOLUTION_API_KEY: 'chave-evo-de-teste', EVOLUTION_INSTANCE: 'inst-teste', ADMIN_WHATSAPP: '5511900000000' };
+const ENV = { EVOLUTION_API_URL: EVO, EVOLUTION_API_KEY: 'chave-evo-de-teste', EVOLUTION_INSTANCE: 'inst-teste', ADMIN_WHATSAPP: '5511900000000', EVOLUTION_WEBHOOK_TOKEN: 'tok-webhook-de-teste-0123456789abcdef' };
 const setEnv = (on) => { for (const [k, v] of Object.entries(ENV)) { if (on) process.env[k] = v; else delete process.env[k]; } };
 setEnv(true);
-const EXPECTED_URL = 'https://www.ilocarpay.com.br/api/ilocarpay-broker?step=evolution-webhook';
+// GATE-WA-ENTRYPOINTS-01: a URL registrada leva o token do webhook (parâmetro wt).
+const EXPECTED_URL = 'https://www.ilocarpay.com.br/api/ilocarpay-broker?step=evolution-webhook&wt=tok-webhook-de-teste-0123456789abcdef';
 
 // ── rede simulada: qualquer host fora do Evolution fictício é contado como violação ──
 const net = { calls: [], mode: 'ok', delayMs: 0, webhook: null, everCalls: 0, everUnexpected: 0 };
@@ -58,7 +59,7 @@ const CAT = {
 };
 const isCat = (r, code) => r.statusCode === CAT[code][0] && r.body && r.body.code === code && r.body.error === CAT[code][1];
 // Vazamentos: resposta do provedor, credencial, telefone, instância, URL interna, e-mail, stack.
-const VAZA = new RegExp(['provider-raw', 'chave-evo-de-teste', '5511900000000', '11900000000', 'inst-teste', 'evo\\.example', 'ECONNREFUSED', 'senha-de-teste', 'EAUTH', '535', 'smtp', '/var/', '\\bat \\w+ \\(', 'Error:', 'Bearer', '@', 'stack', 'apikey', 'baseUrl', 'instance'].join('|'), 'i');
+const VAZA = new RegExp(['tok-webhook-de-teste', 'provider-raw', 'chave-evo-de-teste', '5511900000000', '11900000000', 'inst-teste', 'evo\\.example', 'ECONNREFUSED', 'senha-de-teste', 'EAUTH', '535', 'smtp', '/var/', '\\bat \\w+ \\(', 'Error:', 'Bearer', '@', 'stack', 'apikey', 'baseUrl', 'instance'].join('|'), 'i');
 
 const NOW0 = 1_800_000_000_000; let clock = NOW0; const realNow = Date.now; Date.now = () => clock;
 function base() {

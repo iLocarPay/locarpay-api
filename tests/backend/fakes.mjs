@@ -132,6 +132,19 @@ let txChain = Promise.resolve();
 export function makeDb() {
   return {
     collection: (name) => new CollRef(name),
+    // collectionGroup: todas as coleções cujo último segmento é o nome (ex.: 'messages' e 'maintenance/x/messages').
+    collectionGroup: (name) => ({
+      where(f, op, v) { return this._q ? (this._q = this._q.where(f, op, v), this) : (this._q = null, this.__f = [...(this.__f || []), [f, op, v]], this); },
+      async get() {
+        const cols = [...store.keys()].filter((c) => c === name || c.endsWith('/' + name));
+        const docs = [];
+        for (const c of cols) { const s = await new Query(c, this.__f || []).get(); docs.push(...s.docs); }
+        spies.reads.push('group:' + name);
+        return { empty: docs.length === 0, size: docs.length, docs };
+      },
+    }),
+    // batch: escritas acumuladas e aplicadas no commit.
+    batch: () => { const ops = []; return { update: (ref, obj) => { ops.push(() => ref.update(obj)); }, set: (ref, obj, o) => { ops.push(() => ref.set(obj, o)); }, commit: async () => { for (const op of ops) await op(); spies.batches = (spies.batches || 0) + 1; } }; },
     runTransaction: (fn) => {
       const run = txChain.then(async () => {
         const writes = [];
