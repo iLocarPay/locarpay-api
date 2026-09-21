@@ -1,4 +1,4 @@
-// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01 + P0-BROKER-OPEN-STEPS-01).
+// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01 + P0-BROKER-OPEN-STEPS-01 + P0-OWNER-WEBHOOK-SECRET-01).
 // Um defeito por vez; as suítes TÊM de falhar.
 // Uso: cd tests/backend && node mutants.cjs  (restaura os arquivos ao final, mesmo com falha).
 const { execSync } = require('child_process');
@@ -8,9 +8,10 @@ const W = path.resolve(__dirname, '../..') + '/';
 const BRK = W + 'api/ilocarpay-broker.js';
 const ADM = W + 'public/admin/index.html';
 const ALZ = W + 'lib/authz.js';
+const OWN = W + 'api/ilocarpay-owner.js';
 const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
-const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8') };
-const SUITES = ['retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
+const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8'), [OWN]: fs.readFileSync(OWN, 'utf8') };
+const SUITES = ['owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
 const toCrlf = (t) => t.split(CR + LF).join(LF).split(LF).join(CR + LF);
 
 const M = [
@@ -77,6 +78,25 @@ const M = [
   [BRK, 'TOOLS/SAN: log do WhatsApp volta a gravar o corpo do provedor', "    if (!r.ok) console.warn('[whatsapp] sendText falhou: status', r.status);", "    if (!r.ok) console.warn('[whatsapp] sendText falhou:', await r.text().catch(() => r.status));"],
   [BRK, 'TOOLS/FALHA: envio de WhatsApp sempre reportado como sucesso', "    return r.ok === true;", "    return true;"],
   [BRK, 'TOOLS/FALHA: erro de SMTP vira resposta com e.message', "        throw publicError('PROVIDER_UNAVAILABLE', 'test-email: smtp falhou');", "        throw Object.assign(new Error(e.message), { status: 502 });"],
+
+  // ══ P0-OWNER-WEBHOOK-SECRET-01: setup-webhook do ilocarpay-owner.js ══
+  [OWN, 'OWNER/AUTH: gate removido', "    if (step === 'setup-webhook')          await requireMasterBearer(req);\n", ""],
+  [OWN, 'OWNER/SECRET: volta ao segredo do corpo (undefined === undefined)', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook' && body.secret !== process.env.MIGRATE_SECRET) throw Object.assign(new Error('nao autorizado'), { status: 403 });"],
+  [OWN, 'OWNER/SECRET: segredo do corpo aceito como alternativa ao master', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook' && !(process.env.MIGRATE_SECRET && body.secret === process.env.MIGRATE_SECRET)) await requireMasterBearer(req);"],
+  [OWN, 'OWNER/SECRET: sem checar existência da variável (aceita vazio == vazio)', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook' && !(typeof body.secret === 'string' && body.secret === (process.env.MIGRATE_SECRET || ''))) await requireMasterBearer(req);"],
+  [OWN, 'OWNER/SECRET: comparação invertida', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook' && body.secret !== process.env.MIGRATE_SECRET) await requireMasterBearer(req);"],
+  [OWN, 'OWNER/SECRET: segredo pela query', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook' && !(process.env.MIGRATE_SECRET && req.query?.secret === process.env.MIGRATE_SECRET)) await requireMasterBearer(req);"],
+  [OWN, 'OWNER/AUTH: master-only trocado por qualquer autenticado', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook')          await verifyFirebaseToken(req);"],
+  [OWN, 'OWNER/AUTH: ADMIN_SECRET (superadmin por senha) passa a autorizar', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook')          await requireSuperAdmin(req).catch(() => requireMasterBearer(req));"],
+  [OWN, 'OWNER/ORDEM: provedor chamado antes da autenticação', "    if (step === 'setup-webhook')          await requireMasterBearer(req);", "    if (step === 'setup-webhook')          { await fetch(`${ASAAS_BASE}/webhooks`).catch(() => {}); await requireMasterBearer(req); }"],
+  [OWN, 'OWNER/METHOD: método mutável aceito fora de POST', "  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });", "  if (req.method !== 'POST' && req.method !== 'PUT') return res.status(405).json({ error: 'Method not allowed' });"],
+  [OWN, 'OWNER/RATE: limite removido', "    if (count >= SETUP_WEBHOOK_LIMIT) throw", "    if (false) throw"],
+  [OWN, 'OWNER/CONC: lock ignorado', "    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw Object.assign(new Error('Esta ferramenta", "    if (false) throw Object.assign(new Error('Esta ferramenta"],
+  [OWN, 'OWNER/IDEMP: reescreve mesmo já configurado', "      if (same) return { ok: true, action: 'unchanged' };", "      if (false) return { ok: true, action: 'unchanged' };"],
+  [OWN, 'OWNER/IDEMP: listagem falha e mesmo assim cria (duplicata)', "    if (!listResp.ok) { console.error('[setup-webhook] Asaas list status', listResp.status); throw providerDown(); }\n    const listJson = await listResp.json().catch(() => null);\n    if (!listJson || !Array.isArray(listJson.data)) { console.error('[setup-webhook] Asaas list sem data'); throw providerDown(); }\n    const existing = listJson.data.find(", "    const listJson = await listResp.json().catch(() => null);\n    const existing = ((listJson && listJson.data) || []).find("],
+  [OWN, 'OWNER/SAN: e.message de falha inesperada volta à resposta', "    console.error('[setup-webhook] falha inesperada:', (e && e.name) || 'erro');\n    throw providerDown();", "    throw e;"],
+  [OWN, 'OWNER/SAN: resposta crua do provedor volta ao cliente', "    if (!createResp.ok) { console.error('[setup-webhook] Asaas create status', createResp.status); throw providerDown(); }", "    if (!createResp.ok) throw Object.assign(new Error(await createResp.text()), { status: 502 });"],
+  [OWN, 'OWNER/SAN: sucesso volta a devolver dados do provedor', "    return { ok: true, action: 'created' };", "    return { ok: true, action: 'created', webhookId: created.id, url: BILLING_WEBHOOK_URL, events };"],
 ];
 
 let killed = 0; const survivors = [];

@@ -10,7 +10,7 @@ import { getAuth }                        from 'firebase-admin/auth';
 import { getMessaging }                   from 'firebase-admin/messaging';
 import { getStorage }                     from 'firebase-admin/storage';
 import nodemailer                         from 'nodemailer';
-import { requireSuperAdmin }              from '../lib/authz.js';
+import { requireSuperAdmin, requireMasterBearer } from '../lib/authz.js';
 
 // URL base do Asaas — configure ASAAS_API_URL para apontar ao sandbox em dev/homologação.
 // Em produção, se a variável não estiver definida, usa o endpoint de produção (compatibilidade).
@@ -473,46 +473,82 @@ async function handleBillingStatus(db, body) {
   };
 }
 
-async function handleSetupWebhook(db, body) {
-  const { secret } = body;
-  if (secret !== process.env.MIGRATE_SECRET) throw Object.assign(new Error('nao autorizado'), { status: 403 });
+// ── P0-OWNER-WEBHOOK-SECRET-01: webhook de cobrança da conta master Asaas ───────
+// Antes: autorizado por `body.secret !== process.env.MIGRATE_SECRET`. Sem a variável configurada,
+// um corpo sem `secret` fazia undefined !== undefined === false e o step rodava ANÔNIMO, criando/
+// alterando o webhook com a chave master e devolvendo o JSON cru do Asaas em caso de erro.
+// Agora: master (requireMasterBearer, no dispatch); nada do corpo é lido; limite + lock no
+// servidor; lista falha -> não cria (evita duplicata); já configurado -> não altera; respostas fixas.
+const BILLING_WEBHOOK_URL = 'https://ilocarpay.com.br/billing-webhook';
+const BILLING_WEBHOOK_EVENTS = Object.freeze(['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED', 'PAYMENT_OVERDUE', 'SUBSCRIPTION_DELETED']);
+const SETUP_WEBHOOK_TOOL = 'owner-setup-webhook';
+const SETUP_WEBHOOK_LIMIT = 5;
+const SETUP_WEBHOOK_WINDOW_MS = 60 * 60 * 1000;
+const SETUP_WEBHOOK_LOCK_MS = 60 * 1000;
+const providerDown = () => Object.assign(new Error('Serviço externo indisponível no momento. Tente novamente mais tarde.'), { status: 503 });
 
+async function acquireSetupWebhookSlot(db) {
+  const ref = db.collection('_toolRateLimits').doc(SETUP_WEBHOOK_TOOL);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const d = snap.exists ? (snap.data() || {}) : {};
+    const now = Date.now();
+    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw Object.assign(new Error('Esta ferramenta já está em execução. Aguarde alguns instantes.'), { status: 409 });
+    const inWindow = typeof d.windowStart === 'number' && now - d.windowStart < SETUP_WEBHOOK_WINDOW_MS;
+    const count = inWindow && typeof d.count === 'number' ? d.count : 0;
+    if (count >= SETUP_WEBHOOK_LIMIT) throw Object.assign(new Error('Limite de uso desta ferramenta atingido. Tente novamente mais tarde.'), { status: 429 });
+    tx.set(ref, { windowStart: inWindow ? d.windowStart : now, count: count + 1, lockUntil: now + SETUP_WEBHOOK_LOCK_MS });
+  });
+  return ref;
+}
+
+async function handleSetupWebhook(db) {
   const masterKey = await getMasterAsaasKey(db);
-  if (!masterKey) throw Object.assign(new Error('Chave master Asaas nao encontrada'), { status: 500 });
-
-  const webhookUrl = 'https://ilocarpay.com.br/billing-webhook';
-  const events = ['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED', 'PAYMENT_OVERDUE', 'SUBSCRIPTION_DELETED'];
-
-  // Lista webhooks existentes para evitar duplicata
-  const listResp = await fetch(`${ASAAS_BASE}/webhooks`, {
-    headers: { 'access_token': masterKey }
-  });
-  const listJson = await listResp.json();
-  const existing = (listJson.data || []).find(w => w.url === webhookUrl);
-
-  if (existing) {
-    // Atualiza para garantir que os eventos estao corretos
-    const updResp = await fetch(`${ASAAS_BASE}/webhooks/${existing.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'access_token': masterKey },
-      body: JSON.stringify({ url: webhookUrl, enabled: true, events })
-    });
-    const upd = await updResp.json();
-    if (!updResp.ok) throw new Error(`Asaas webhook update: ${JSON.stringify(upd)}`);
-    await db.collection('config').doc('asaas-webhook').set({ webhookId: upd.id, url: webhookUrl, events, updatedAt: Timestamp.now() });
-    return { ok: true, action: 'updated', webhookId: upd.id, url: webhookUrl, events };
+  if (!masterKey || typeof masterKey !== 'string') {
+    throw Object.assign(new Error('Integração não configurada neste ambiente. Acione o suporte iLocarPay.'), { status: 503 });
   }
+  const slot = await acquireSetupWebhookSlot(db);
+  try {
+    const listResp = await fetch(`${ASAAS_BASE}/webhooks`, { headers: { 'access_token': masterKey } });
+    if (!listResp.ok) { console.error('[setup-webhook] Asaas list status', listResp.status); throw providerDown(); }
+    const listJson = await listResp.json().catch(() => null);
+    if (!listJson || !Array.isArray(listJson.data)) { console.error('[setup-webhook] Asaas list sem data'); throw providerDown(); }
+    const existing = listJson.data.find((w) => w && w.url === BILLING_WEBHOOK_URL);
+    const events = [...BILLING_WEBHOOK_EVENTS];
 
-  // Cria novo webhook
-  const createResp = await fetch(`${ASAAS_BASE}/webhooks`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'access_token': masterKey },
-    body: JSON.stringify({ name: 'iLocarPay Billing', url: webhookUrl, email: 'contatotransgu@gmail.com', enabled: true, interrupted: false, type: 'PAYMENT', sendType: 'NON_SEQUENTIALLY', events })
-  });
-  const created = await createResp.json();
-  if (!createResp.ok) throw new Error(`Asaas webhook create: ${JSON.stringify(created)}`);
-  await db.collection('config').doc('asaas-webhook').set({ webhookId: created.id, url: webhookUrl, events, createdAt: Timestamp.now() });
-  return { ok: true, action: 'created', webhookId: created.id, url: webhookUrl, events };
+    if (existing) {
+      const same = existing.enabled === true && Array.isArray(existing.events)
+        && existing.events.length === events.length && events.every((ev) => existing.events.includes(ev));
+      if (same) return { ok: true, action: 'unchanged' };
+      // Atualiza para garantir que os eventos estao corretos
+      const updResp = await fetch(`${ASAAS_BASE}/webhooks/${existing.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'access_token': masterKey },
+        body: JSON.stringify({ url: BILLING_WEBHOOK_URL, enabled: true, events })
+      });
+      if (!updResp.ok) { console.error('[setup-webhook] Asaas update status', updResp.status); throw providerDown(); }
+      const upd = await updResp.json().catch(() => ({}));
+      await db.collection('config').doc('asaas-webhook').set({ webhookId: upd.id || existing.id, url: BILLING_WEBHOOK_URL, events, updatedAt: Timestamp.now() });
+      return { ok: true, action: 'updated' };
+    }
+
+    // Cria novo webhook
+    const createResp = await fetch(`${ASAAS_BASE}/webhooks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'access_token': masterKey },
+      body: JSON.stringify({ name: 'iLocarPay Billing', url: BILLING_WEBHOOK_URL, email: 'contatotransgu@gmail.com', enabled: true, interrupted: false, type: 'PAYMENT', sendType: 'NON_SEQUENTIALLY', events })
+    });
+    if (!createResp.ok) { console.error('[setup-webhook] Asaas create status', createResp.status); throw providerDown(); }
+    const created = await createResp.json().catch(() => ({}));
+    await db.collection('config').doc('asaas-webhook').set({ webhookId: created.id || null, url: BILLING_WEBHOOK_URL, events, createdAt: Timestamp.now() });
+    return { ok: true, action: 'created' };
+  } catch (e) {
+    if (e && typeof e.status === 'number') throw e;
+    console.error('[setup-webhook] falha inesperada:', (e && e.name) || 'erro');
+    throw providerDown();
+  } finally {
+    try { await slot.update({ lockUntil: 0 }); } catch (_) { console.error('[setup-webhook] falha ao liberar lock'); }
+  }
 }
 
 async function handleNotifyTrial(db, body) {
@@ -1040,7 +1076,10 @@ export default async function handler(req, res) {
     if (step === 'billing-status') return res.status(200).json(await handleBillingStatus(db, body));
     if (step === 'notify-trial')   return res.status(200).json(await handleNotifyTrial(db, body));
     if (step === 'notify-renewal') return res.status(200).json(await handleNotifyRenewal(db, body));
-    if (step === 'setup-webhook')          return res.status(200).json(await handleSetupWebhook(db, body));
+    // P0-OWNER-WEBHOOK-SECRET-01: master via Firebase Bearer ANTES de ler configuração ou chamar o
+    // Asaas. O antigo segredo no corpo (MIGRATE_SECRET) não autoriza mais este step.
+    if (step === 'setup-webhook')          await requireMasterBearer(req);
+    if (step === 'setup-webhook')          return res.status(200).json(await handleSetupWebhook(db));
     if (step === 'setup-payment-webhook')  return res.status(200).json(await handleSetupPaymentWebhook(db, body));
     if (step === 'delete-tenant')        return res.status(200).json(await handleDeleteTenant(db, body, req));
     if (step === 'send-notification')    return res.status(200).json(await handleSendNotification(db, body));
