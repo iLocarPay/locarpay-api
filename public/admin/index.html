@@ -272,12 +272,16 @@
   window.disconnectWhatsapp = async () => {
     if (!confirm('Desconectar o WhatsApp desta imobiliária?')) return;
     try {
-      const { getAuth } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js');
-      const token = await getAuth().currentUser?.getIdToken();
-      await fetch('/api/ilocarpay-broker', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      // P0-OWNER-WHATSAPP-DISCONNECT-01: token da sessão do painel; ownerId só como asserção.
+      if (!auth.currentUser) throw new Error('Sessão expirada. Entre novamente.');
+      const _dcTkn = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/ilocarpay-broker', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _dcTkn },
         body: JSON.stringify({ step: 'whatsapp-disconnect', ownerId: currentOwnerId })
       });
+      const data = await res.json().catch(() => ({}));
+      // Só marca como desconectado quando o servidor confirma.
+      if (!res.ok) throw new Error(res.status === 401 ? 'Sessão expirada. Entre novamente.' : (data.error || 'Erro ' + res.status));
       currentOwnerData = { ...currentOwnerData, whatsappConnected: false };
       loadConfigTab();
       showToast('WhatsApp desconectado', 'success');

@@ -218,7 +218,8 @@ ok('40. webhook do Evolution inalterado (200)', r.statusCode === 200 && r.body.o
 base(); r = await call({ step: 'setup-webhook', ownerId: 'ownerA' }, H.adminA);
 ok('41. setup-webhook continua master-only (admin -> 403)', r.statusCode === 403 && noProvider(), J(r));
 const gate = src.slice(src.indexOf("    else if (step === 'whatsapp-qr') {"), src.indexOf('    let result;'));
-ok('42. whatsapp-disconnect não foi ampliado nem alterado neste lote', !/whatsapp-disconnect/.test(gate) && /async function handleWhatsappDisconnect\(db, body\) \{/.test(src));
+// 42. P0-OWNER-WHATSAPP-DISCONNECT-01 fechou o disconnect com o MESMO gate canônico do QR (sem ampliar acesso).
+ok('42. whatsapp-disconnect usa o mesmo resolvedor canônico do QR (admin da própria imobiliária)', /else if \(step === 'whatsapp-disconnect'\) \{[\s\S]{0,300}req\._waOrg = await resolveWhatsappAdmin\(db, req\);/.test(src) && /async function handleWhatsappDisconnect\(db, org\) \{/.test(src));
 ok('43. Serverless Functions = 12', readdirSync(new URL('api/', ROOT)).filter((f) => f.endsWith('.js') && !f.startsWith('_')).length === 12);
 ok('43b. schema multi-tenant futuro não criado', !/whatsapp_integrations/.test(src));
 const admin = read('public/admin/index.html');

@@ -1522,22 +1522,69 @@ async function handleWhatsappQr(db, org) {
   }
 }
 
-async function handleWhatsappDisconnect(db, body) {
-  const rawId = body.ownerId;
-  const ownerId = (rawId && typeof rawId === 'string' && rawId !== 'undefined' && rawId.trim()) ? rawId.trim() : null;
-  let ownerData = null;
-  if (ownerId) {
-    const snap = await db.collection('owners').doc(ownerId).get();
-    ownerData = snap.exists ? snap.data() : null;
+// ── P0-OWNER-WHATSAPP-DISCONNECT-01: desconectar o WhatsApp da PRÓPRIA imobiliária ──
+// Antes: anônimo; o ownerId do corpo escolhia o alvo e, sem ownerId, deslogava a instância GLOBAL
+// da plataforma; a falha do logout era engolida e whatsappConnected:false era gravado mesmo assim.
+// Agora: admin ativo (resolveWhatsappAdmin, mesmo vínculo canônico do QR); só a instância já
+// vinculada; lock + limite persistidos em Firestore (transação); só faz logout se o provedor
+// disser que está conectada; sucesso só é gravado depois da confirmação do provedor.
+const WA_DISC_ORG_LIMIT = 5;
+const WA_DISC_WINDOW_MS = 60 * 60 * 1000;
+const WA_DISC_LOCK_MS = 60 * 1000; // lock abandonado expira sozinho após 60 s
+
+async function acquireWhatsappDisconnectSlot(db, ownerId) {
+  const ref = db.collection('_toolRateLimits').doc('wa-disc-org-' + ownerId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const d = snap.exists ? (snap.data() || {}) : {};
+    const now = Date.now();
+    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw publicError('TOOL_BUSY', 'wa-disc: operação em andamento');
+    const inWindow = typeof d.windowStart === 'number' && now - d.windowStart < WA_DISC_WINDOW_MS;
+    const count = inWindow && typeof d.count === 'number' ? d.count : 0;
+    if (count >= WA_DISC_ORG_LIMIT) throw publicError('TOOL_RATE_LIMITED', 'wa-disc: limite da organização');
+    tx.set(ref, { windowStart: inWindow ? d.windowStart : now, count: count + 1, lockUntil: now + WA_DISC_LOCK_MS });
+  });
+  return ref;
+}
+
+async function handleWhatsappDisconnect(db, org) {
+  const inst = typeof org.ownerData.evolutionInstance === 'string' ? org.ownerData.evolutionInstance.trim() : '';
+  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-disc: organização sem instância vinculada');
+  const globalInst = String(process.env.EVOLUTION_INSTANCE || '').trim();
+  if (globalInst && inst === globalInst) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-disc: instância igual à da plataforma');
+  const dup = await db.collection('owners').where('evolutionInstance', '==', inst).limit(2).get();
+  if (dup.size !== 1) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-disc: instância compartilhada ou inconsistente');
+  const { baseUrl, apiKey } = getEvoConfig(org.ownerData, org.ownerId);
+  if (!baseUrl || !apiKey) throw publicError('INTEGRATION_NOT_CONFIGURED', 'wa-disc: evolution sem configuração');
+
+  const slot = await acquireWhatsappDisconnectSlot(db, org.ownerId);
+  try {
+    const evoFetch = makeEvoFetch(baseUrl, apiKey);
+    const st = await evoFetch(`instance/connectionState/${encodeURIComponent(inst)}`);
+    if (!st.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-disc: connectionState status ' + st.status);
+    const sj = await st.json().catch(() => null);
+    const state = sj && ((sj.instance && sj.instance.state) || sj.state);
+    if (typeof state !== 'string' || !state) throw publicError('PROVIDER_UNAVAILABLE', 'wa-disc: estado ilegível');
+    const ownerRef = db.collection('owners').doc(org.ownerId);
+    if (state !== 'open') {
+      // Já desconectada no provedor: nenhum logout; só alinha o status gravado, se necessário.
+      if (org.ownerData.whatsappConnected !== false) {
+        await ownerRef.update({ whatsappConnected: false, whatsappDisconnectedAt: new Date().toISOString() });
+      }
+      return { ok: true, disconnected: true, changed: false };
+    }
+    // Só logout: não apaga instância, sessão salva nem webhook.
+    const lo = await evoFetch(`instance/logout/${encodeURIComponent(inst)}`, { method: 'DELETE' });
+    if (!lo.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-disc: logout status ' + lo.status);
+    await ownerRef.update({ whatsappConnected: false, whatsappDisconnectedAt: new Date().toISOString() });
+    return { ok: true, disconnected: true, changed: true };
+  } catch (e) {
+    if (e && e.status) throw e;
+    console.error('[wa-disc] falha:', (e && e.name) || 'erro');
+    throw publicError('PROVIDER_UNAVAILABLE', 'wa-disc: falha de rede ou gravação');
+  } finally {
+    try { await slot.update({ lockUntil: 0 }); } catch (_) { console.error('[wa-disc] falha ao liberar lock'); }
   }
-  const { baseUrl, apiKey, instance } = getEvoConfig(ownerData, ownerId);
-  if (!baseUrl || !apiKey || !instance) throw Object.assign(new Error('Evolution API não configurada'), { status: 500 });
-  const evoFetch = makeEvoFetch(baseUrl, apiKey);
-  await evoFetch(`instance/logout/${instance}`, { method: 'DELETE' }).catch(() => {});
-  if (ownerId) {
-    await db.collection('owners').doc(ownerId).update({ whatsappConnected: false }).catch(() => {});
-  }
-  return { ok: true };
 }
 
 async function handleWaKeepalive(db) {
@@ -2070,6 +2117,11 @@ async function handleCronRetryAssinafy(db) {
     // SEC-CONTRACT-03B2: steps internos de contrato. Ordem obrigatória:
     // autenticar -> carregar recurso -> ownership -> estado -> só então side effect externo/write.
     // Identidade vem só do Firebase ID token; body.ownerId/tenantId/brokerId/email nunca concedem privilégio.
+    else if (step === 'whatsapp-disconnect') {
+      // P0-OWNER-WHATSAPP-DISCONNECT-01: admin ativo da própria imobiliária (derivada do token);
+      // ownerId do corpo só como asserção (divergente -> 404). Nada é lido do alvo antes disso.
+      req._waOrg = await resolveWhatsappAdmin(db, req);
+    }
     else if (step === 'whatsapp-qr') {
       // WHATSAPP-MT-02: QR é credencial efêmera — nenhuma resposta deste step pode ser cacheada.
       res.setHeader('Cache-Control', 'no-store, private, max-age=0');
@@ -2212,7 +2264,7 @@ async function handleCronRetryAssinafy(db) {
       throw Object.assign(new Error('endpoint desativado'), { status: 410 });
     }
     else if (step === 'whatsapp-disconnect') {
-      result = await handleWhatsappDisconnect(db, req.body);
+      result = await handleWhatsappDisconnect(db, req._waOrg);
     }
     else if (step === 'wa-keepalive') {
       result = await handleWaKeepalive(db);

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Testes dos handlers de api/ com fakes em memória (sem rede, sem Firestore real)",
   "scripts": {
-    "test": "node --loader ./loader.mjs retry-assinafy.test.mjs && node --loader ./loader.mjs broker-tools.test.mjs && node --loader ./loader.mjs owner-webhook.test.mjs && node --loader ./loader.mjs qr-public.test.mjs && node --loader ./loader.mjs whatsapp-qr.test.mjs",
+    "test": "node --loader ./loader.mjs retry-assinafy.test.mjs && node --loader ./loader.mjs broker-tools.test.mjs && node --loader ./loader.mjs owner-webhook.test.mjs && node --loader ./loader.mjs qr-public.test.mjs && node --loader ./loader.mjs whatsapp-qr.test.mjs && node --loader ./loader.mjs whatsapp-disconnect.test.mjs",
     "mutants": "node mutants.cjs"
   }
 }

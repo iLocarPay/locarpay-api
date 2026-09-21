@@ -1,4 +1,4 @@
-// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01, WHATSAPP-MT-02).
+// Teste de mutação da hotfix (P0-RETRY-ASSINAFY-01, P0-BROKER-OPEN-STEPS-01, P0-OWNER-WEBHOOK-SECRET-01, P0-QR-PUBLIC-01, WHATSAPP-MT-02, P0-OWNER-WHATSAPP-DISCONNECT-01).
 // Um defeito por vez; as suítes TÊM de falhar.
 // Uso: cd tests/backend && node mutants.cjs  (restaura os arquivos ao final, mesmo com falha).
 const { execSync } = require('child_process');
@@ -13,7 +13,7 @@ const VCJ = W + 'vercel.json';
 const QRP = W + 'public/qr/index.html';
 const CR = String.fromCharCode(13), LF = String.fromCharCode(10);
 const orig = { [BRK]: fs.readFileSync(BRK, 'utf8'), [ADM]: fs.readFileSync(ADM, 'utf8'), [ALZ]: fs.readFileSync(ALZ, 'utf8'), [OWN]: fs.readFileSync(OWN, 'utf8'), [VCJ]: fs.readFileSync(VCJ, 'utf8') };
-const SUITES = ['whatsapp-qr.test.mjs', 'qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
+const SUITES = ['whatsapp-disconnect.test.mjs', 'whatsapp-qr.test.mjs', 'qr-public.test.mjs', 'owner-webhook.test.mjs', 'retry-assinafy.test.mjs', 'broker-tools.test.mjs'];
 const toCrlf = (t) => t.split(CR + LF).join(LF).split(LF).join(CR + LF);
 
 const M = [
@@ -63,7 +63,7 @@ const M = [
   // limites e concorrência
   [BRK, 'TOOLS/RATE: limite removido', "    if (count >= TOOL_LIMITS[step]) throw", "    if (false) throw"],
   [BRK, 'TOOLS/RATE: janela nunca reinicia', "    const inWindow = typeof d.windowStart === 'number' && now - d.windowStart < TOOL_WINDOW_MS;", "    const inWindow = typeof d.windowStart === 'number';"],
-  [BRK, 'TOOLS/CONC: lock de execução ignorado', "    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw publicError('TOOL_BUSY'", "    if (false) throw publicError('TOOL_BUSY'"],
+  [BRK, "TOOLS/CONC: lock de execução ignorado", "    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw publicError('TOOL_BUSY', 'tool: execução em andamento');", "    if (false) throw publicError('TOOL_BUSY', 'tool: execução em andamento');"],
   // destinatários
   [BRK, 'TOOLS/DEST: test-email aceita destinatário arbitrário', "        if (to.trim().toLowerCase() !== self) throw publicError('RECIPIENT_NOT_ALLOWED'", "        if (false) throw publicError('RECIPIENT_NOT_ALLOWED'"],
   [BRK, 'TOOLS/DEST: test-email envia para o "to" do corpo', "      try { await sendEmail(self, '✅ Teste SMTP — iLocarPay'", "      try { await sendEmail(to || self, '✅ Teste SMTP — iLocarPay'"],
@@ -108,13 +108,13 @@ const M = [
   [BRK, "MT02/ESCOPO: ownerId do corpo escolhe a organização", "  const doc = q.docs[0];", "  const doc = (req.body && typeof req.body.ownerId === 'string') ? await db.collection('owners').doc(req.body.ownerId).get() : q.docs[0];"],
   [BRK, "MT02/ESCOPO: ownerId divergente deixa de dar 404", "  if (asked !== undefined && asked !== null && asked !== '' && asked !== doc.id) {", "  if (false) {"],
   [BRK, "MT02/ESCOPO: instanceId do corpo escolhe a instância", "      result = await handleWhatsappQr(db, req._waOrg);", "      result = await handleWhatsappQr(db, { ...req._waOrg, ownerData: { ...req._waOrg.ownerData, evolutionInstance: req.body.instanceId || req._waOrg.ownerData.evolutionInstance } });"],
-  [BRK, "MT02/INST: sem instância cai na instância global", "  const inst = typeof org.ownerData.evolutionInstance === 'string' ? org.ownerData.evolutionInstance.trim() : '';", "  const inst = (typeof org.ownerData.evolutionInstance === 'string' && org.ownerData.evolutionInstance.trim()) || String(process.env.EVOLUTION_INSTANCE || '').trim();"],
-  [BRK, "MT02/INST: instância igual à da plataforma aceita", "  if (globalInst && inst === globalInst) throw", "  if (false) throw"],
-  [BRK, "MT02/INST: instância compartilhada entre imobiliárias aceita", "  if (dup.size !== 1) throw", "  if (false) throw"],
+  [BRK, "MT02/INST: sem instância cai na instância global", "  const inst = typeof org.ownerData.evolutionInstance === 'string' ? org.ownerData.evolutionInstance.trim() : '';\n  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-qr:", "  const inst = (typeof org.ownerData.evolutionInstance === 'string' && org.ownerData.evolutionInstance.trim()) || String(process.env.EVOLUTION_INSTANCE || '').trim();\n  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-qr:"],
+  [BRK, "MT02/INST: instância igual à da plataforma aceita", "  if (globalInst && inst === globalInst) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-qr:", "  if (false) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-qr:"],
+  [BRK, "MT02/INST: instância compartilhada entre imobiliárias aceita", "  if (dup.size !== 1) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-qr:", "  if (false) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-qr:"],
   [BRK, "MT02/NAO-DESTRUTIVO: cria instância quando ausente", "  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-qr: organização sem instância vinculada');", "  if (!inst) { const c = getEvoConfig(org.ownerData, org.ownerId); await makeEvoFetch(c.baseUrl, c.apiKey)('instance/create', { method: 'POST', body: '{}' }).catch(() => {}); throw publicError('WHATSAPP_NOT_PROVISIONED', 'x'); }"],
   [BRK, "MT02/NAO-DESTRUTIVO: provedor 404 apaga e recria", "    if (!st.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-qr: connectionState status ' + st.status);", "    if (!st.ok) { await evoFetch(`instance/delete/${inst}`, { method: 'DELETE' }).catch(() => {}); await evoFetch('instance/create', { method: 'POST', body: '{}' }).catch(() => {}); throw publicError('PROVIDER_UNAVAILABLE', 'x'); }"],
   [BRK, "MT02/NAO-DESTRUTIVO: conectado ainda gera novo QR", "    if (state === 'open') {\n      if (org.ownerData.whatsappConnected !== true) {", "    if (false) {\n      if (org.ownerData.whatsappConnected !== true) {"],
-  [BRK, "MT02/ORDEM: provedor chamado antes da autorização", "      req._waOrg = await resolveWhatsappAdmin(db, req);", "      { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/connectionState/${c.instance}`).catch(() => {}); }\n      req._waOrg = await resolveWhatsappAdmin(db, req);"],
+  [BRK, "MT02/ORDEM: provedor chamado antes da autorização", "      res.setHeader('Expires', '0');\n      req._waOrg = await resolveWhatsappAdmin(db, req);", "      res.setHeader('Expires', '0');\n      { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/connectionState/${c.instance}`).catch(() => {}); }\n      req._waOrg = await resolveWhatsappAdmin(db, req);"],
   [BRK, "MT02/RATE: limite removido", "      if (count >= limits[k]) throw", "      if (false) throw"],
   [BRK, "MT02/LOCK: lock por organização removido", "    if (typeof org.lockUntil === 'number' && org.lockUntil > now) throw publicError('TOOL_BUSY'", "    if (false) throw publicError('TOOL_BUSY'"],
   [BRK, "MT02/QR: Cache-Control no-store removido", "      res.setHeader('Cache-Control', 'no-store, private, max-age=0');", "      res.setHeader('Cache-Control', 'public, max-age=60');"],
@@ -127,9 +127,39 @@ const M = [
   [ADM, "MT02/CALLER: painel deixa de enviar o Bearer", "        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _qrTkn },\n        body: JSON.stringify({ step: 'whatsapp-qr', ownerId: _qrOwnerId })", "        method: 'POST', headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify({ step: 'whatsapp-qr', ownerId: _qrOwnerId })"],
   [ADM, "MT02/CALLER: painel volta a logar a resposta do QR", "      const data = await res.json();\n      if (!res.ok) { const he = new Error", "      const data = await res.json();\n      console.log('[whatsapp-qr] response:', JSON.stringify(data).slice(0, 200));\n      if (!res.ok) { const he = new Error"],
   [ADM, "MT02/CALLER: fechar o modal não remove o QR", "  $('btn-wa-modal-close').addEventListener('click', () => _closeWhatsappQr());", "  $('btn-wa-modal-close').addEventListener('click', () => { _clearQrTimers(); $('modal-whatsapp-qr').style.display = 'none'; });"],
+  // ══ P0-OWNER-WHATSAPP-DISCONNECT-01 ══
+  [BRK, "DISC/AUTH: gate removido (alvo vindo do corpo)", "      // ownerId do corpo só como asserção (divergente -> 404). Nada é lido do alvo antes disso.\n      req._waOrg = await resolveWhatsappAdmin(db, req);", "      // ownerId do corpo só como asserção (divergente -> 404). Nada é lido do alvo antes disso.\n      req._waOrg = { auth: { uid: 'anon' }, ownerId: String((req.body && req.body.ownerId) || 'x'), ownerData: (await db.collection('owners').doc(String((req.body && req.body.ownerId) || 'x')).get()).data() || {} };"],
+  [BRK, "DISC/ORDEM: provedor chamado antes da autorização", "      // ownerId do corpo só como asserção (divergente -> 404). Nada é lido do alvo antes disso.\n      req._waOrg = await resolveWhatsappAdmin(db, req);", "      { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/connectionState/${c.instance}`).catch(() => {}); }\n      // ownerId do corpo só como asserção (divergente -> 404). Nada é lido do alvo antes disso.\n      req._waOrg = await resolveWhatsappAdmin(db, req);"],
+  [BRK, "DISC/ESCOPO: instanceId do corpo escolhe a instância", "      result = await handleWhatsappDisconnect(db, req._waOrg);", "      result = await handleWhatsappDisconnect(db, { ...req._waOrg, ownerData: { ...req._waOrg.ownerData, evolutionInstance: req.body.instanceId || req._waOrg.ownerData.evolutionInstance } });"],
+  [BRK, "DISC/INST: sem instância desloga a instância global", "  if (!inst) throw publicError('WHATSAPP_NOT_PROVISIONED', 'wa-disc: organização sem instância vinculada');", "  if (!inst) { const c = getEvoConfig(null, null); await makeEvoFetch(c.baseUrl, c.apiKey)(`instance/logout/${c.instance}`, { method: 'DELETE' }).catch(() => {}); throw publicError('WHATSAPP_NOT_PROVISIONED', 'x'); }"],
+  [BRK, "DISC/INST: instância igual à da plataforma aceita", "  if (globalInst && inst === globalInst) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-disc:", "  if (false) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-disc:"],
+  [BRK, "DISC/INST: instância compartilhada aceita", "  if (dup.size !== 1) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-disc:", "  if (false) throw publicError('WHATSAPP_CONFIG_INVALID', 'wa-disc:"],
+  [BRK, "DISC/CONC: lock por organização removido", "    if (typeof d.lockUntil === 'number' && d.lockUntil > now) throw publicError('TOOL_BUSY', 'wa-disc: operação em andamento');", "    if (false) throw publicError('TOOL_BUSY', 'wa-disc: operação em andamento');"],
+  [BRK, "DISC/RATE: limite removido", "    if (count >= WA_DISC_ORG_LIMIT) throw", "    if (false) throw"],
+  [BRK, "DISC/REPETICAO: desloga mesmo já desconectada", "    if (state !== 'open') {", "    if (false) {"],
+  [BRK, "DISC/NAO-DESTRUTIVO: apaga a instância em vez de logout", "    const lo = await evoFetch(`instance/logout/${encodeURIComponent(inst)}`, { method: 'DELETE' });", "    const lo = await evoFetch(`instance/delete/${encodeURIComponent(inst)}`, { method: 'DELETE' });"],
+  [BRK, "DISC/FALHA: erro do logout gravado como sucesso", "    if (!lo.ok) throw publicError('PROVIDER_UNAVAILABLE', 'wa-disc: logout status ' + lo.status);", "    if (!lo.ok) { await ownerRef.update({ whatsappConnected: false }); return { ok: true, disconnected: true, changed: true }; }"],
+  [BRK, "DISC/FALHA: falha do logout engolida (comportamento antigo)", "    const lo = await evoFetch(`instance/logout/${encodeURIComponent(inst)}`, { method: 'DELETE' });", "    const lo = await evoFetch(`instance/logout/${encodeURIComponent(inst)}`, { method: 'DELETE' }).catch(() => ({ ok: true }));"],
+  [BRK, "DISC/FALHA: timeout grava desconectado", "    console.error('[wa-disc] falha:', (e && e.name) || 'erro');", "    await db.collection('owners').doc(org.ownerId).update({ whatsappConnected: false }).catch(() => {});\n    console.error('[wa-disc] falha:', (e && e.name) || 'erro');"],
+  [BRK, "DISC/SAN: e.message volta à resposta", "    console.error('[wa-disc] falha:', (e && e.name) || 'erro');\n    throw publicError('PROVIDER_UNAVAILABLE', 'wa-disc: falha de rede ou gravação');", "    throw Object.assign(new Error(e.message), { status: 502 });"],
+  [BRK, "DISC/SAN: resposta do provedor devolvida", "    return { ok: true, disconnected: true, changed: true };", "    return { ok: true, disconnected: true, changed: true, provider: await lo.json().catch(() => null) };"],
+  [ADM, "DISC/CALLER: painel deixa de enviar o Bearer", "        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _dcTkn },", "        method: 'POST', headers: { 'Content-Type': 'application/json' },"],
+  [ADM, "DISC/CALLER: painel marca desconectado sem conferir res.ok", "      if (!res.ok) throw new Error(res.status === 401 ? 'Sessão expirada. Entre novamente.' : (data.error || 'Erro ' + res.status));\n", ""],
   // ══ P0-QR-PUBLIC-01: rota pública ══
   [VCJ, 'QR/ROTA: rewrite /qr reintroduzido', '"rewrites": [', '"rewrites": [\n    { "source": "/qr", "destination": "/api/ilocarpay-broker" },'],
 ];
+
+// --check: só valida que cada alvo existe exatamente 1x no arquivo (sem rodar suítes).
+if (process.argv.includes('--check')) {
+  let bad = 0;
+  for (const [file, name, from0] of M) {
+    const o = orig[file]; const from = o.includes(from0) ? from0 : toCrlf(from0);
+    const n = o.split(from).length - 1;
+    if (n !== 1) { bad++; console.log('  alvo ' + n + 'x: ' + name); }
+  }
+  console.log('mutantes: ' + M.length + ' (+1 de criação) | alvos inválidos: ' + bad);
+  process.exit(bad ? 1 : 0);
+}
 
 let killed = 0; const survivors = [];
 for (const [file, name, from0, to0] of M) {
